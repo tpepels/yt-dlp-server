@@ -70,7 +70,10 @@ def tool_version(command):
             timeout=5,
             check=False,
         )
-        return (completed.stdout or completed.stderr).strip().splitlines()[0]
+        if completed.returncode != 0:
+            return "unavailable"
+        output = (completed.stdout or completed.stderr).strip().splitlines()
+        return output[0] if output else "unavailable"
     except Exception:
         return "unavailable"
 
