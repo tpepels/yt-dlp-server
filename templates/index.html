@@ -17,8 +17,12 @@
     input[type=url] { width:100%; min-width:0; border:1px solid var(--line); border-radius:10px; background:#0e1012; color:var(--text); padding:13px 14px; font:inherit; outline:none; }
     input[type=url]:focus { border-color:#6b737b; }
     button { border:0; border-radius:10px; padding:0 18px; background:#e9ecef; color:#111315; font:650 14px system-ui,sans-serif; cursor:pointer; }
+    button:disabled { opacity:.55; cursor:wait; }
     .checks { display:flex; flex-wrap:wrap; gap:18px; color:var(--muted); }
     label { display:flex; gap:8px; align-items:center; }
+    .probe { min-height:20px; color:var(--muted); font-size:13px; }
+    .probe.good { color:var(--good); }
+    .probe.warn { color:var(--wait); }
     .path { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; word-break:break-all; }
     .error { background:#361b1d; color:#ffd2cf; border:1px solid #713238; border-radius:10px; padding:11px 13px; margin-bottom:14px; }
     .section-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
@@ -43,13 +47,14 @@
   <p class="sub">Audio only. Metadata and cover art embedded when the source provides them.</p>
   <section class="panel">
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
-    <form action="/download" method="post">
+    <form id="download-form" action="/download" method="post">
       <div class="url-row">
-        <input type="url" name="url" placeholder="https://music.youtube.com/watch?v=..." required autofocus>
-        <button type="submit">Download</button>
+        <input id="url-input" type="url" name="url" placeholder="https://music.youtube.com/watch?v=..." required autofocus>
+        <button id="download-button" type="submit">Download</button>
       </div>
+      <div id="probe-result" class="probe"></div>
       <div class="checks">
-        <label><input type="checkbox" name="playlist"> Download playlist / album</label>
+        <label><input id="playlist-input" type="checkbox" name="playlist" checked> Download playlist / album when present</label>
         <label><input type="checkbox" name="force"> Ignore archive and overwrite existing file</label>
       </div>
     </form>
@@ -65,6 +70,16 @@
 </main>
 <script>
   const initialJobs = {{ jobs | tojson }};
+  const form = document.getElementById("download-form");
+  const urlInput = document.getElementById("url-input");
+  const downloadButton = document.getElementById("download-button");
+  const probeResult = document.getElementById("probe-result");
+
+  let probeTimer = null;
+  let probeController = null;
+  let probedUrl = "";
+  let probeInFlight = null;
+
   function renderJobs(jobs) {
     const root = document.getElementById("jobs");
     root.replaceChildren();
@@ -116,13 +131,111 @@
       root.appendChild(card);
     }
   }
+
+  function validHttpUrl(value) {
+    try {
+      const parsed = new URL(value);
+      return parsed.protocol === "http:" || parsed.protocol === "https:";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function probeUrl(value) {
+    const url = value.trim();
+    if (!validHttpUrl(url)) {
+      probedUrl = "";
+      probeResult.textContent = "";
+      probeResult.className = "probe";
+      return false;
+    }
+
+    if (probeController) probeController.abort();
+    probeController = new AbortController();
+
+    probeResult.textContent = "Checking link…";
+    probeResult.className = "probe";
+    downloadButton.disabled = true;
+
+    probeInFlight = (async () => {
+      try {
+        const response = await fetch("/api/probe", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({url}),
+          signal: probeController.signal,
+        });
+        const data = await response.json();
+
+        if (urlInput.value.trim() !== url) return false;
+
+        probedUrl = url;
+        if (!response.ok || !data.ok) {
+          probeResult.textContent = "Could not inspect link: " + (data.error || "unknown error") + " Download can still proceed.";
+          probeResult.className = "probe warn";
+          return true;
+        }
+
+        if (data.kind === "playlist") {
+          const count = data.count ? " · " + data.count + " items" : "";
+          probeResult.textContent = "Playlist / album detected · " + data.title + count;
+          probeResult.className = "probe good";
+        } else {
+          probeResult.textContent = "Single item detected · " + data.title;
+          probeResult.className = "probe good";
+        }
+        return true;
+      } catch (error) {
+        if (error.name === "AbortError") return false;
+        if (urlInput.value.trim() === url) {
+          probedUrl = url;
+          probeResult.textContent = "Could not inspect link. Download can still proceed.";
+          probeResult.className = "probe warn";
+        }
+        return true;
+      } finally {
+        if (urlInput.value.trim() === url) downloadButton.disabled = false;
+      }
+    })();
+
+    return probeInFlight;
+  }
+
+  urlInput.addEventListener("input", () => {
+    probedUrl = "";
+    clearTimeout(probeTimer);
+    probeResult.textContent = "";
+    probeResult.className = "probe";
+
+    if (!validHttpUrl(urlInput.value.trim())) return;
+    probeTimer = setTimeout(() => probeUrl(urlInput.value), 500);
+  });
+
+  form.addEventListener("submit", async (event) => {
+    const url = urlInput.value.trim();
+    if (!validHttpUrl(url) || probedUrl === url) return;
+
+    event.preventDefault();
+    clearTimeout(probeTimer);
+
+    if (probeInFlight) {
+      await probeInFlight;
+    } else {
+      await probeUrl(url);
+    }
+
+    if (urlInput.value.trim() === url) form.requestSubmit();
+  });
+
   renderJobs(initialJobs);
+
   async function refreshJobs() {
     try {
       const response = await fetch("/api/jobs", {cache:"no-store"});
       if (response.ok) renderJobs(await response.json());
     } catch (_) {}
   }
+
   setInterval(refreshJobs, 2000);
 </script>
 </body>
