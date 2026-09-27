@@ -31,6 +31,7 @@ if not IMPORT_SUBDIR or Path(IMPORT_SUBDIR).is_absolute() or ".." in Path(IMPORT
 IMPORT_ROOT = MUSIC_ROOT / IMPORT_SUBDIR
 ARCHIVE_FILE = STATE_DIR / "archive.txt"
 SPOTDL_ARCHIVE_FILE = STATE_DIR / "spotdl-archive.txt"
+JOBS_STATE_FILE = STATE_DIR / "jobs.json"
 
 for directory in (IMPORT_ROOT, STATE_DIR, TEMP_DIR):
     directory.mkdir(parents=True, exist_ok=True)
@@ -90,6 +91,142 @@ VERSIONS = {
     ]),
     "spotdl": tool_version(["spotdl", "--version"]),
 }
+
+
+def persist_jobs_locked():
+    """Persist the complete UI/job state atomically. Caller must hold jobs_lock."""
+    payload = {
+        "version": 1,
+        "saved_at": time.time(),
+        "jobs": list(jobs.values()),
+    }
+    tmp_path = JOBS_STATE_FILE.with_suffix(".json.tmp")
+    try:
+        tmp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, JOBS_STATE_FILE)
+    except OSError:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+
+
+def persist_jobs():
+    with jobs_lock:
+        persist_jobs_locked()
+
+
+def normalize_persisted_job(raw):
+    if not isinstance(raw, dict) or not raw.get("url"):
+        return None
+
+    now = time.time()
+    job_id = str(raw.get("id") or uuid.uuid4().hex[:10])
+    status = raw.get("status") if raw.get("status") in {"queued", "running", "succeeded", "failed"} else "failed"
+    source = raw.get("source") or ("spotify" if is_spotify_url(raw["url"]) else "yt-dlp")
+    retry_base_completed = raw.get("retry_base_completed")
+    if retry_base_completed is None:
+        retry_base_completed = (
+            int(raw.get("completed_items") or 0)
+            if source == "spotify" and int(raw.get("attempt") or 1) > 1
+            else 0
+        )
+
+    job = {
+        "id": job_id,
+        "url": str(raw["url"]),
+        "playlist": bool(raw.get("playlist", False)),
+        "album_mode": bool(raw.get("album_mode", False)),
+        "compilation": bool(raw.get("compilation", False)),
+        "force": bool(raw.get("force", False)),
+        "status": status,
+        "message": str(raw.get("message") or "Restored job"),
+        "progress": str(raw.get("progress") or ""),
+        "current_item": int(raw.get("current_item") or 0),
+        "total_items": int(raw.get("total_items") or 0),
+        "completed_items": int(raw.get("completed_items") or 0),
+        "files": list(raw.get("files") or []),
+        "log": list(raw.get("log") or [])[-40:],
+        "created_at": float(raw.get("created_at") or now),
+        "started_at": raw.get("started_at"),
+        "finished_at": raw.get("finished_at"),
+        "returncode": raw.get("returncode"),
+        "http_403": bool(raw.get("http_403", False)),
+        "retry_of": raw.get("retry_of"),
+        "attempt": int(raw.get("attempt") or 1),
+        "source": source,
+        "retry_base_completed": int(retry_base_completed),
+        "failed_items": int(raw.get("failed_items") or 0),
+        "missing_tracks": list(raw.get("missing_tracks") or []),
+        "resolution_of": raw.get("resolution_of"),
+        "spotify_track_url": raw.get("spotify_track_url"),
+        "manual_source_url": raw.get("manual_source_url"),
+        "download_query": raw.get("download_query"),
+    }
+
+    # /api/jobs from older versions intentionally exposed less internal state.
+    # Reconstruct a queued manual-resolution query when possible.
+    if (
+        not job["download_query"]
+        and job["resolution_of"]
+        and job["spotify_track_url"]
+        and job["manual_source_url"]
+    ):
+        job["download_query"] = f'{job["manual_source_url"]}|{job["spotify_track_url"]}'
+
+    # A process that was running when the container stopped cannot still be
+    # running after restart. Preserve it as a retryable interruption instead
+    # of silently starting it again and risking duplicate/forced downloads.
+    if job["status"] == "running":
+        job["status"] = "failed"
+        job["finished_at"] = now
+        job["returncode"] = None
+        job["message"] = "Interrupted by server restart - use Retry / continue"
+        job["log"].append("Server restarted while this job was running.")
+        job["log"] = job["log"][-40:]
+
+    return job
+
+
+def load_persisted_jobs():
+    if not JOBS_STATE_FILE.is_file():
+        return []
+
+    try:
+        raw = json.loads(JOBS_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    items = raw.get("jobs", []) if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return []
+
+    restored = []
+    for item in items:
+        job = normalize_persisted_job(item)
+        if job is not None:
+            restored.append(job)
+
+    restored.sort(key=lambda item: item["created_at"])
+    # Do not drop queued work on restore. Runtime history pruning only removes
+    # terminal jobs, so the persisted loader must preserve the same guarantee.
+    if len(restored) > MAX_HISTORY:
+        queued = [item for item in restored if item["status"] == "queued"]
+        terminal = [item for item in restored if item["status"] != "queued"]
+        keep_terminal = max(0, MAX_HISTORY - len(queued))
+        restored = terminal[-keep_terminal:] + queued if keep_terminal else queued
+        restored.sort(key=lambda item: item["created_at"])
+
+    with jobs_lock:
+        jobs.clear()
+        for job in restored:
+            jobs[job["id"]] = job
+        persist_jobs_locked()
+
+    return [job["id"] for job in restored if job["status"] == "queued"]
 
 
 def validate_url(value):
@@ -524,6 +661,7 @@ def append_log(job_id, line):
                 if job["total_items"]:
                     job["completed_items"] = min(job["completed_items"], job["total_items"])
                 job["message"] = "Saved Spotify track"
+                persist_jobs_locked()
 
             job["log"].append(line)
             job["log"] = job["log"][-40:]
@@ -543,6 +681,7 @@ def append_log(job_id, line):
                 job["files"].append(filepath)
                 job["completed_items"] += 1
             job["message"] = f"Saved {Path(filepath).name}"
+            persist_jobs_locked()
             return
 
         playlist_match = _playlist_item_re.match(line)
@@ -563,6 +702,7 @@ def run_job(job_id):
         job["status"] = "running"
         job["started_at"] = time.time()
         job["message"] = "Starting spotDL" if job.get("source") == "spotify" else "Starting yt-dlp"
+        persist_jobs_locked()
 
     is_spotify = job.get("source") == "spotify"
     cmd = build_spotdl_command(job) if is_spotify else build_command(job)
@@ -642,6 +782,7 @@ def run_job(job_id):
                         job["message"] = "YouTube returned HTTP 403 - PO-token provider unavailable"
                 else:
                     job["message"] = f"yt-dlp exited with code {returncode}"
+            persist_jobs_locked()
     except Exception as exc:
         with jobs_lock:
             job = jobs[job_id]
@@ -649,6 +790,7 @@ def run_job(job_id):
             job["finished_at"] = time.time()
             job["message"] = str(exc)
             job["log"].append(f"ERROR: {exc}")
+            persist_jobs_locked()
 
 def worker():
     while True:
@@ -658,6 +800,19 @@ def worker():
         finally:
             download_queue.task_done()
 
+
+restored_queue_ids = load_persisted_jobs()
+for restored_id in restored_queue_ids:
+    try:
+        download_queue.put_nowait(restored_id)
+    except queue.Full:
+        with jobs_lock:
+            restored_job = jobs.get(restored_id)
+            if restored_job:
+                restored_job["status"] = "failed"
+                restored_job["message"] = "Could not restore queued job - queue capacity exceeded"
+                restored_job["finished_at"] = time.time()
+                persist_jobs_locked()
 
 threading.Thread(target=worker, name="yt-dlp-worker", daemon=True).start()
 
@@ -783,12 +938,14 @@ def download():
             )
             while len(jobs) > MAX_HISTORY and removable:
                 jobs.pop(removable.pop(0)["id"], None)
+        persist_jobs_locked()
 
     try:
         download_queue.put_nowait(job_id)
     except queue.Full:
         with jobs_lock:
             jobs.pop(job_id, None)
+            persist_jobs_locked()
         return render_template(
             "index.html",
             jobs=public_jobs(),
@@ -853,12 +1010,14 @@ def retry_job(job_id):
             "download_query": None,
         }
         jobs[retry_id] = retry
+        persist_jobs_locked()
 
     try:
         download_queue.put_nowait(retry_id)
     except queue.Full:
         with jobs_lock:
             jobs.pop(retry_id, None)
+            persist_jobs_locked()
         return jsonify({"ok": False, "error": "Download queue is full."}), 429
 
     return jsonify({"ok": True, "job_id": retry_id}), 202
@@ -934,12 +1093,14 @@ def resolve_missing_spotify_track(job_id):
             "download_query": f"{source_url}|{spotify_url}",
         }
         jobs[resolution_id] = resolution
+        persist_jobs_locked()
 
     try:
         download_queue.put_nowait(resolution_id)
     except queue.Full:
         with jobs_lock:
             jobs.pop(resolution_id, None)
+            persist_jobs_locked()
         return jsonify({"ok": False, "error": "Download queue is full."}), 429
 
     return jsonify({"ok": True, "job_id": resolution_id}), 202
@@ -986,6 +1147,10 @@ def health():
             "queue": download_queue.qsize(),
             "import_root": str(IMPORT_ROOT),
             "versions": VERSIONS,
+            "jobs_state": {
+                "path": str(JOBS_STATE_FILE),
+                "persisted": JOBS_STATE_FILE.is_file(),
+            },
             "spotify": {
                 "enabled": VERSIONS.get("spotdl", "unavailable") != "unavailable",
                 "archive": str(SPOTDL_ARCHIVE_FILE),
