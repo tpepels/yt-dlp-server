@@ -30,6 +30,7 @@ if not IMPORT_SUBDIR or Path(IMPORT_SUBDIR).is_absolute() or ".." in Path(IMPORT
 
 IMPORT_ROOT = MUSIC_ROOT / IMPORT_SUBDIR
 ARCHIVE_FILE = STATE_DIR / "archive.txt"
+SPOTDL_ARCHIVE_FILE = STATE_DIR / "spotdl-archive.txt"
 
 for directory in (IMPORT_ROOT, STATE_DIR, TEMP_DIR):
     directory.mkdir(parents=True, exist_ok=True)
@@ -40,6 +41,12 @@ OUTPUT_TEMPLATE = (
     "%(track_number,playlist_index&{:02d} - |)s"
     "%(track,title).180S [%(id)s].%(ext)s"
 )
+SPOTDL_OUTPUT_TEMPLATE = str(
+    IMPORT_ROOT
+    / "{album-artist}"
+    / "{album}"
+    / "{track-number} - {title} [{track-id}].{output-ext}"
+)
 
 jobs = {}
 jobs_lock = threading.Lock()
@@ -48,6 +55,10 @@ probe_cache_lock = threading.Lock()
 download_queue = queue.Queue(maxsize=MAX_QUEUE)
 _progress_re = re.compile(r"^\[download\]\s+(.+?)(?:\s+of\s+|\s+at\s+|\s+ETA\s+|$)")
 _playlist_item_re = re.compile(r"^\[download\]\s+Downloading item\s+(\d+)\s+of\s+(\d+)")
+_spotdl_progress_re = re.compile(r"(\d+)/(\d+) complete")
+_spotdl_downloaded_re = re.compile(r'\bDownloaded "')
+_spotdl_existing_re = re.compile(r"\bSkipping .+\(file already exists\)")
+_ansi_re = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def tool_version(command):
@@ -73,6 +84,7 @@ VERSIONS = {
         "-c",
         "import importlib.metadata; print(importlib.metadata.version('bgutil-ytdlp-pot-provider'))",
     ]),
+    "spotdl": tool_version(["spotdl", "--version"]),
 }
 
 
@@ -89,6 +101,31 @@ def validate_url(value):
     if parsed.username or parsed.password:
         return None, "URLs containing credentials are not accepted."
     return value, None
+
+
+def is_spotify_url(url):
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+
+    hostname = (parsed.hostname or "").lower()
+    return hostname in {
+        "open.spotify.com",
+        "spotify.com",
+        "www.spotify.com",
+        "spotify.link",
+    }
+
+
+def spotify_link_type(url):
+    if not is_spotify_url(url):
+        return None
+    parts = [part for part in urlparse(url).path.split("/") if part]
+    for item_type in ("track", "album", "playlist", "artist", "show", "episode"):
+        if item_type in parts:
+            return item_type
+    return "link"
 
 
 def is_youtube_url(url):
@@ -132,6 +169,23 @@ def youtube_extractor_args(url):
         ])
 
     return args
+
+
+def spotdl_ytdlp_args():
+    args = [
+        "--extractor-args",
+        f"youtube:player_client={YOUTUBE_PLAYER_CLIENT}",
+    ]
+    if BGUTIL_SERVER_HOME.is_dir():
+        args.extend([
+            "--extractor-args",
+            f"youtubepot-bgutilscript:server_home={BGUTIL_SERVER_HOME}",
+        ])
+    return " ".join(args)
+
+
+def spotdl_error_file(job_id):
+    return TEMP_DIR / f"spotdl-errors-{job_id}.log"
 
 
 def album_playlist_metadata_args(compilation=False):
@@ -275,6 +329,46 @@ def probe_url(url):
     return result
 
 
+def build_spotdl_command(job):
+    cmd = [
+        "spotdl",
+        "download",
+        job["url"],
+        "--simple-tui",
+        "--headless",
+        "--log-level",
+        "INFO",
+        "--threads",
+        "1",
+        "--format",
+        "opus",
+        "--bitrate",
+        "disable",
+        "--output",
+        SPOTDL_OUTPUT_TEMPLATE,
+        "--overwrite",
+        "force" if job["force"] else "skip",
+        "--lyrics",
+        "--print-errors",
+        "--save-errors",
+        str(spotdl_error_file(job["id"])),
+        "--max-filename-length",
+        "180",
+        "--audio",
+        "youtube-music",
+        "youtube",
+        "--yt-dlp-args",
+        spotdl_ytdlp_args(),
+    ]
+
+    if not job["force"]:
+        cmd.extend(["--archive", str(SPOTDL_ARCHIVE_FILE)])
+    if COOKIES_FILE and Path(COOKIES_FILE).is_file():
+        cmd.extend(["--cookie-file", COOKIES_FILE])
+
+    return cmd
+
+
 def build_command(job):
     cmd = [
         "yt-dlp",
@@ -325,7 +419,7 @@ def build_command(job):
 
 
 def append_log(job_id, line):
-    line = line.rstrip()
+    line = _ansi_re.sub("", line.rstrip())
     if not line:
         return
 
@@ -336,6 +430,26 @@ def append_log(job_id, line):
 
         if "HTTP Error 403: Forbidden" in line:
             job["http_403"] = True
+
+        if job.get("source") == "spotify":
+            progress_match = _spotdl_progress_re.search(line)
+            if progress_match:
+                processed = int(progress_match.group(1))
+                remaining_total = int(progress_match.group(2))
+                base = job.get("retry_base_completed", 0)
+                job["current_item"] = base + processed
+                job["total_items"] = max(job["total_items"], base + remaining_total)
+                job["progress"] = f"{processed}/{remaining_total} processed this attempt"
+
+            if _spotdl_downloaded_re.search(line) or _spotdl_existing_re.search(line):
+                job["completed_items"] += 1
+                if job["total_items"]:
+                    job["completed_items"] = min(job["completed_items"], job["total_items"])
+                job["message"] = "Saved Spotify track"
+
+            job["log"].append(line)
+            job["log"] = job["log"][-40:]
+            return
 
         if line.startswith("__YTDLP_ITEM__="):
             position = line.split("=", 1)[1]
@@ -365,15 +479,18 @@ def append_log(job_id, line):
         job["log"].append(line)
         job["log"] = job["log"][-40:]
 
-
 def run_job(job_id):
     with jobs_lock:
         job = jobs[job_id]
         job["status"] = "running"
         job["started_at"] = time.time()
-        job["message"] = "Starting yt-dlp"
+        job["message"] = "Starting spotDL" if job.get("source") == "spotify" else "Starting yt-dlp"
 
-    cmd = build_command(job)
+    is_spotify = job.get("source") == "spotify"
+    cmd = build_spotdl_command(job) if is_spotify else build_command(job)
+    error_file = spotdl_error_file(job_id) if is_spotify else None
+    if error_file and error_file.exists():
+        error_file.unlink()
 
     try:
         process = subprocess.Popen(
@@ -389,29 +506,58 @@ def run_job(job_id):
             append_log(job_id, line)
 
         returncode = process.wait()
+        spotdl_errors = []
+        if error_file and error_file.exists():
+            for error_line in error_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                error_line = error_line.strip()
+                if not error_line or re.fullmatch(r"\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}", error_line):
+                    continue
+                spotdl_errors.append(error_line)
+            try:
+                error_file.unlink()
+            except OSError:
+                pass
 
         with jobs_lock:
             job = jobs[job_id]
             job["returncode"] = returncode
             job["finished_at"] = time.time()
-            if returncode == 0:
+            job["failed_items"] = len(spotdl_errors)
+            if spotdl_errors:
+                job["log"].append("spotDL errors:")
+                job["log"].extend(spotdl_errors[-20:])
+                job["log"] = job["log"][-40:]
+
+            failed = returncode != 0 or bool(spotdl_errors)
+            if not failed:
                 job["status"] = "succeeded"
-                if job["files"]:
+                if is_spotify:
+                    if job["total_items"]:
+                        job["message"] = f"Completed - {job['completed_items']}/{job['total_items']} tracks saved"
+                    elif job["completed_items"]:
+                        job["message"] = f"Completed - {job['completed_items']} tracks saved"
+                    else:
+                        job["message"] = "Completed - nothing new to download"
+                elif job["files"]:
                     count = len(job["files"])
                     job["message"] = f"Completed - {count} file{'s' if count != 1 else ''}"
                 else:
                     job["message"] = "Completed - nothing new to download"
             else:
                 job["status"] = "failed"
-                if job["http_403"] and is_youtube_url(job["url"]):
-                    if BGUTIL_SERVER_HOME.is_dir():
+                if is_spotify:
+                    if job["total_items"]:
                         job["message"] = (
-                            "YouTube returned HTTP 403 despite PO-token support"
+                            f"Partial - {job['completed_items']}/{job['total_items']} tracks saved; "
+                            f"{max(1, job['failed_items'])} failed"
                         )
                     else:
-                        job["message"] = (
-                            "YouTube returned HTTP 403 - PO-token provider unavailable"
-                        )
+                        job["message"] = f"spotDL failed; {max(1, job['failed_items'])} track(s) failed"
+                elif job["http_403"] and is_youtube_url(job["url"]):
+                    if BGUTIL_SERVER_HOME.is_dir():
+                        job["message"] = "YouTube returned HTTP 403 despite PO-token support"
+                    else:
+                        job["message"] = "YouTube returned HTTP 403 - PO-token provider unavailable"
                 else:
                     job["message"] = f"yt-dlp exited with code {returncode}"
     except Exception as exc:
@@ -421,7 +567,6 @@ def run_job(job_id):
             job["finished_at"] = time.time()
             job["message"] = str(exc)
             job["log"].append(f"ERROR: {exc}")
-
 
 def worker():
     while True:
@@ -461,6 +606,8 @@ def public_jobs():
                 "http_403": job["http_403"],
                 "retry_of": job["retry_of"],
                 "attempt": job["attempt"],
+                "source": job.get("source", "yt-dlp"),
+                "failed_items": job.get("failed_items", 0),
             }
             for job in ordered
         ]
@@ -488,8 +635,9 @@ def download():
             error=error,
         ), 400
 
-    playlist_enabled = request.form.get("playlist") == "on"
-    album_mode = playlist_enabled and is_youtube_album_playlist(url)
+    source = "spotify" if is_spotify_url(url) else "yt-dlp"
+    playlist_enabled = request.form.get("playlist") == "on" if source == "yt-dlp" else False
+    album_mode = source == "yt-dlp" and playlist_enabled and is_youtube_album_playlist(url)
     probe_result = get_cached_probe_result(url) if album_mode else None
     if album_mode and probe_result is None:
         try:
@@ -530,6 +678,9 @@ def download():
         "http_403": False,
         "retry_of": None,
         "attempt": 1,
+        "source": source,
+        "retry_base_completed": 0,
+        "failed_items": 0,
     }
 
     with jobs_lock:
@@ -601,6 +752,9 @@ def retry_job(job_id):
             "http_403": False,
             "retry_of": job_id,
             "attempt": previous.get("attempt", 1) + 1,
+            "source": previous.get("source", "yt-dlp"),
+            "retry_base_completed": completed,
+            "failed_items": 0,
         }
         jobs[retry_id] = retry
 
@@ -620,6 +774,17 @@ def api_probe():
     url, error = validate_url(payload.get("url"))
     if error:
         return jsonify({"ok": False, "error": error}), 400
+
+    if is_spotify_url(url):
+        return jsonify({
+            "ok": True,
+            "kind": "spotify",
+            "title": f"Spotify {spotify_link_type(url)}",
+            "count": None,
+            "extractor": "spotDL",
+            "album_mode": False,
+            "album_artist": None,
+        })
 
     try:
         result = probe_url(url)
@@ -644,6 +809,11 @@ def health():
             "queue": download_queue.qsize(),
             "import_root": str(IMPORT_ROOT),
             "versions": VERSIONS,
+            "spotify": {
+                "enabled": VERSIONS.get("spotdl", "unavailable") != "unavailable",
+                "archive": str(SPOTDL_ARCHIVE_FILE),
+                "format": "opus",
+            },
             "youtube_po": {
                 "available": BGUTIL_SERVER_HOME.is_dir(),
                 "server_home": str(BGUTIL_SERVER_HOME),

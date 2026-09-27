@@ -2,3 +2,4 @@ Flask>=3.1,<4
 gunicorn>=23,<24
 yt-dlp[default,curl-cffi]
 bgutil-ytdlp-pot-provider==2.0.0
+spotdl==4.5.2

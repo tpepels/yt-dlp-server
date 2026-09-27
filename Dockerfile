@@ -5,6 +5,7 @@ ARG BGUTIL_VERSION=2.0.0
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8 \
     HOME=/tmp/yt-dlp-home \
     XDG_CACHE_HOME=/tmp/yt-dlp-cache \
     DENO_DIR=/tmp/deno \
