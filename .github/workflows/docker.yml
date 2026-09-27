@@ -19,10 +19,15 @@ jobs:
           docker run --rm yt-dlp-server:test yt-dlp --version
           docker run --rm yt-dlp-server:test deno --version
           docker run --rm yt-dlp-server:test ffmpeg -version
-      - name: Validate non-root runtime and naming template
+      - name: Validate non-root runtime, naming and playlist classification
         run: |
           docker run --rm --user 1000:1000 \
             -e MUSIC_ROOT=/tmp/music \
             -e STATE_DIR=/tmp/state \
             -e TEMP_DIR=/tmp/work \
-            yt-dlp-server:test python -c 'import app, yt_dlp; y=yt_dlp.YoutubeDL({"outtmpl": app.OUTPUT_TEMPLATE}); p=y.prepare_filename({"id":"abc123","title":"Fallback title","ext":"webm","artist":"Test Artist","album":"Test Album","track":"Test Track","track_number":1}); assert p == "Test Artist/Test Album/01 - Test Track [abc123].webm", p; q=y.prepare_filename({"id":"def456","title":"Loose Song","ext":"m4a","uploader":"Test Uploader"}); assert q == "Test Uploader/Singles/Loose Song [def456].m4a", q; print(p); print(q)'
+            yt-dlp-server:test python -c 'import app, yt_dlp; y=yt_dlp.YoutubeDL({"outtmpl": app.OUTPUT_TEMPLATE}); p=y.prepare_filename({"id":"abc123","title":"Fallback title","ext":"webm","artist":"Test Artist","album":"Test Album","track":"Test Track","track_number":1}); assert p == "Test Artist/Test Album/01 - Test Track [abc123].webm", p; q=y.prepare_filename({"id":"def456","title":"Loose Song","ext":"m4a","uploader":"Test Uploader"}); assert q == "Test Uploader/Singles/Loose Song [def456].m4a", q; assert app.classify_probe_info({"_type":"playlist","title":"Album","playlist_count":12}) == {"kind":"playlist","title":"Album","count":12,"extractor":None}; assert app.classify_probe_info({"_type":"video","title":"Track"})["kind"] == "single"; print(p); print(q)'
+      - name: Verify playlist UI defaults
+        run: |
+          grep -q 'id="playlist-input" type="checkbox" name="playlist" checked' templates/index.html
+          grep -q 'action="/download"' templates/index.html
+          grep -q '"/api/probe"' app.py
