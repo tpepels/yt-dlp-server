@@ -81,6 +81,33 @@ def validate_url(value):
     return value, None
 
 
+def is_youtube_album_playlist(url):
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+
+    hostname = (parsed.hostname or "").lower()
+    if hostname not in {"youtube.com", "www.youtube.com", "music.youtube.com", "m.youtube.com"}:
+        return False
+
+    playlist_id = parse_qs(parsed.query).get("list", [""])[0]
+    return playlist_id.startswith("OLAK5uy_")
+
+
+def album_playlist_metadata_args():
+    return [
+        "--parse-metadata",
+        "%(playlist_channel,playlist_uploader,album_artist,artist|)s:%(album_artist)s",
+        "--replace-in-metadata",
+        "album_artist",
+        r"\s+- Topic$",
+        "",
+        "--parse-metadata",
+        "%(playlist_title,album,playlist|)s:%(album)s",
+    ]
+
+
 def cookie_args():
     if COOKIES_FILE and Path(COOKIES_FILE).is_file():
         return ["--cookies", COOKIES_FILE]
@@ -175,6 +202,8 @@ def build_command(job):
 
     if job["playlist"]:
         cmd.append("--yes-playlist")
+        if job["album_mode"]:
+            cmd.extend(album_playlist_metadata_args())
     else:
         cmd.append("--no-playlist")
 
