@@ -183,7 +183,7 @@ def classify_probe_info(info, url=None):
 
     count = info.get("playlist_count")
     if not isinstance(count, int) or count < 1:
-        count = None
+        count = len(entries) if isinstance(entries, list) and entries else None
 
     album_mode = bool(url and is_youtube_album_playlist(url))
     return {
