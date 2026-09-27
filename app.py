@@ -41,6 +41,8 @@ OUTPUT_TEMPLATE = (
 
 jobs = {}
 jobs_lock = threading.Lock()
+probe_cache = {}
+probe_cache_lock = threading.Lock()
 download_queue = queue.Queue(maxsize=MAX_QUEUE)
 _progress_re = re.compile(r"^\[download\]\s+(.+?)(?:\s+of\s+|\s+at\s+|\s+ETA\s+|$)")
 _playlist_item_re = re.compile(r"^\[download\]\s+Downloading item\s+(\d+)\s+of\s+(\d+)")
@@ -194,6 +196,22 @@ def classify_probe_info(info, url=None):
     }
 
 
+def cache_probe_result(url, result):
+    with probe_cache_lock:
+        probe_cache[url] = {"timestamp": time.time(), "result": dict(result)}
+
+
+def get_cached_probe_result(url, max_age=600):
+    with probe_cache_lock:
+        cached = probe_cache.get(url)
+        if not cached:
+            return None
+        if time.time() - cached["timestamp"] > max_age:
+            probe_cache.pop(url, None)
+            return None
+        return dict(cached["result"])
+
+
 def probe_url(url):
     completed = subprocess.run(
         build_probe_command(url, full_playlist=is_youtube_album_playlist(url)),
@@ -213,7 +231,9 @@ def probe_url(url):
     except json.JSONDecodeError as exc:
         raise RuntimeError("yt-dlp returned invalid probe data") from exc
 
-    return classify_probe_info(info, url=url)
+    result = classify_probe_info(info, url=url)
+    cache_probe_result(url, result)
+    return result
 
 
 def build_command(job):
@@ -373,6 +393,7 @@ def public_jobs():
                 "progress": job["progress"],
                 "playlist": job["playlist"],
                 "album_mode": job["album_mode"],
+                "compilation": job["compilation"],
                 "force": job["force"],
                 "current_item": job["current_item"],
                 "total_items": job["total_items"],
@@ -410,18 +431,38 @@ def download():
             error=error,
         ), 400
 
+    playlist_enabled = request.form.get("playlist") == "on"
+    album_mode = playlist_enabled and is_youtube_album_playlist(url)
+    probe_result = get_cached_probe_result(url) if album_mode else None
+    if album_mode and probe_result is None:
+        try:
+            probe_result = probe_url(url)
+        except (subprocess.TimeoutExpired, RuntimeError):
+            probe_result = None
+
+    compilation = bool(
+        probe_result
+        and probe_result.get("album_artist") == "Various Artists"
+    )
+    expected_count = (
+        probe_result.get("count")
+        if probe_result and isinstance(probe_result.get("count"), int)
+        else 0
+    )
+
     job_id = uuid.uuid4().hex[:10]
     job = {
         "id": job_id,
         "url": url,
-        "playlist": request.form.get("playlist") == "on",
-        "album_mode": request.form.get("playlist") == "on" and is_youtube_album_playlist(url),
+        "playlist": playlist_enabled,
+        "album_mode": album_mode,
+        "compilation": compilation,
         "force": request.form.get("force") == "on",
         "status": "queued",
         "message": "Waiting for worker",
         "progress": "",
         "current_item": 0,
-        "total_items": 0,
+        "total_items": expected_count,
         "completed_items": 0,
         "files": [],
         "log": [],
