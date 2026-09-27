@@ -837,7 +837,11 @@ def run_job(job_id):
             job = jobs[job_id]
             job["returncode"] = returncode
             job["finished_at"] = time.time()
-            job["failed_items"] = len(spotdl_errors)
+            job["failed_items"] = (
+                len(spotdl_errors)
+                if is_spotify
+                else len(extract_youtube_missing_tracks(job.get("log", [])))
+            )
             if is_spotify:
                 job["missing_tracks"] = spotdl_missing_tracks
             else:
