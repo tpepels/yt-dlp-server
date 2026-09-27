@@ -32,6 +32,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Runtime is normally an arbitrary non-root UID/GID from Compose. Some Python
+# packages (notably spotDL) create config/cache data under HOME on first import.
+# Recreate these temp roots after package installation so no build-time root-owned
+# directories can block the runtime user.
+RUN rm -rf "$HOME" "$XDG_CACHE_HOME" "$DENO_DIR" \
+    && mkdir -p "$HOME" "$XDG_CACHE_HOME" "$DENO_DIR" \
+    && chmod 1777 "$HOME" "$XDG_CACHE_HOME" "$DENO_DIR"
+
 COPY app.py .
 COPY templates ./templates
 
