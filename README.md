@@ -45,11 +45,11 @@ Assuming this repository is cloned as `./yt-dlp-server` next to the compose file
       build:
         context: ./yt-dlp-server
       container_name: yt-dlp-server
-      user: "\${UID}:\${GID}"
+      user: "${UID}:${GID}"
       ports:
         - "4545:4545"
       environment:
-        TZ: \${TZ}
+        TZ: ${TZ}
         PORT: 4545
         MUSIC_ROOT: /data/music
         IMPORT_SUBDIR: YT-DLP Imports
