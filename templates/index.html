@@ -49,10 +49,18 @@
     .track-progress-fill { height:100%; width:0; background:#8ab4f8; transition:width .2s ease; }
     .job-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
     .retry-button { min-height:34px; padding:7px 12px; background:#dfe5ea; font-size:12px; }
+    .missing-tracks { display:grid; gap:9px; margin-top:11px; }
+    .missing-track { min-width:0; border:1px solid #4b3b2c; background:#1b1815; border-radius:9px; padding:10px; }
+    .missing-track-title { font-size:13px; font-weight:650; color:#f0d7b0; overflow-wrap:anywhere; }
+    .missing-track-url { margin-top:3px; color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
+    .resolver-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; margin-top:8px; }
+    .resolver-row input { width:100%; min-width:0; border:1px solid var(--line); border-radius:8px; background:#0e1012; color:var(--text); padding:9px 10px; font:12px/1.3 inherit; }
+    .resolver-row button { min-height:36px; padding:7px 11px; font-size:12px; }
+    .resolver-error { margin-top:6px; color:var(--bad); font-size:11px; overflow-wrap:anywhere; }
     details { min-width:0; max-width:100%; margin-top:9px; color:var(--muted); } summary { cursor:pointer; }
     pre { width:100%; min-width:0; max-width:100%; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; margin:8px 0 0; padding:10px; background:#0e1012; border-radius:8px; color:#b7bec4; font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; max-height:260px; overflow:auto; }
     .empty { color:var(--muted); padding:8px 0; }
-    @media (max-width:620px) { main{width:calc(100% - 20px);margin-top:16px}.panel{padding:14px}.url-row{grid-template-columns:minmax(0,1fr)}button{min-height:44px}.section-head{display:block}.versions{margin-bottom:10px}.track-progress-head{display:grid;grid-template-columns:1fr}.source-chip{white-space:normal} }
+    @media (max-width:620px) { main{width:calc(100% - 20px);margin-top:16px}.panel{padding:14px}.url-row{grid-template-columns:minmax(0,1fr)}button{min-height:44px}.section-head{display:block}.versions{margin-bottom:10px}.track-progress-head{display:grid;grid-template-columns:1fr}.source-chip{white-space:normal}.resolver-row{grid-template-columns:minmax(0,1fr)} }
   </style>
 </head>
 <body>
@@ -91,7 +99,7 @@
       <div class="sources-note">
         Audio only is always downloaded. yt-dlp supports many more sites;
         <a href="https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md" target="_blank" rel="noopener noreferrer">see the full current list</a>.
-        Spotify links use Spotify metadata while spotDL matches the audio from YouTube Music / YouTube. Some sites may require cookies or may stop working temporarily when the site changes.
+        Spotify links use Spotify metadata while spotDL tries YouTube Music, YouTube, Bandcamp, then SoundCloud for audio. Missing tracks can be resolved manually with a direct YouTube, Bandcamp, or SoundCloud URL. Some sites may require cookies or may stop working temporarily when the site changes.
       </div>
     </div>
   </section>
@@ -120,6 +128,11 @@
   function renderJobs(jobs) {
     const root = document.getElementById("jobs");
     const retriedParents = new Set(jobs.map((job) => job.retry_of).filter(Boolean));
+    const activeResolutions = new Set(
+      jobs
+        .filter((job) => job.resolution_of && (job.status === "queued" || job.status === "running"))
+        .map((job) => job.resolution_of + "|" + job.spotify_track_url)
+    );
     const openLogs = new Set(
       Array.from(root.querySelectorAll(".job details[open]"))
         .map((details) => details.closest(".job")?.dataset.jobId)
@@ -187,6 +200,91 @@
         card.appendChild(progress);
       }
 
+      if (job.status === "failed" && job.source === "spotify" && job.missing_tracks && job.missing_tracks.length) {
+        const missingWrap = document.createElement("div");
+        missingWrap.className = "missing-tracks";
+
+        for (const missing of job.missing_tracks) {
+          if (missing.resolved) continue;
+
+          const item = document.createElement("div");
+          item.className = "missing-track";
+
+          const title = document.createElement("div");
+          title.className = "missing-track-title";
+          title.textContent = "Missing: " + (missing.label || "Spotify track");
+
+          const spotifyUrl = document.createElement("div");
+          spotifyUrl.className = "missing-track-url";
+          spotifyUrl.textContent = missing.spotify_url;
+
+          const row = document.createElement("div");
+          row.className = "resolver-row";
+
+          const input = document.createElement("input");
+          input.type = "url";
+          input.placeholder = "Direct YouTube, Bandcamp, or SoundCloud track URL";
+          input.autocomplete = "off";
+
+          const resolve = document.createElement("button");
+          resolve.type = "button";
+          resolve.textContent = "Resolve track";
+
+          const activeKey = job.id + "|" + missing.spotify_url;
+          if (activeResolutions.has(activeKey)) {
+            input.disabled = true;
+            resolve.disabled = true;
+            resolve.textContent = "Resolving…";
+          }
+
+          const error = document.createElement("div");
+          error.className = "resolver-error";
+
+          resolve.addEventListener("click", async () => {
+            const sourceUrl = input.value.trim();
+            error.textContent = "";
+            if (!validHttpUrl(sourceUrl)) {
+              error.textContent = "Paste a valid source URL.";
+              return;
+            }
+
+            resolve.disabled = true;
+            input.disabled = true;
+            resolve.textContent = "Resolving…";
+            try {
+              const response = await fetch("/api/jobs/" + encodeURIComponent(job.id) + "/resolve", {
+                method: "POST",
+                headers: {"Content-Type": "application/json", "Accept": "application/json"},
+                body: JSON.stringify({
+                  spotify_url: missing.spotify_url,
+                  source_url: sourceUrl,
+                }),
+              });
+              const data = await response.json();
+              if (!response.ok || !data.ok) {
+                error.textContent = data.error || "Could not queue resolution.";
+                resolve.disabled = false;
+                input.disabled = false;
+                resolve.textContent = "Resolve track";
+                return;
+              }
+              await refreshJobs();
+            } catch (_) {
+              error.textContent = "Could not queue resolution.";
+              resolve.disabled = false;
+              input.disabled = false;
+              resolve.textContent = "Resolve track";
+            }
+          });
+
+          row.append(input, resolve);
+          item.append(title, spotifyUrl, row, error);
+          missingWrap.appendChild(item);
+        }
+
+        if (missingWrap.childElementCount) card.appendChild(missingWrap);
+      }
+
       if (job.status === "failed" && !retriedParents.has(job.id)) {
         const actions = document.createElement("div");
         actions.className = "job-actions";
@@ -194,7 +292,9 @@
         const retry = document.createElement("button");
         retry.type = "button";
         retry.className = "retry-button";
-        retry.textContent = "Retry / continue";
+        retry.textContent = job.source === "spotify" && job.missing_tracks && job.missing_tracks.length
+          ? "Retry automatic search"
+          : "Retry / continue";
         retry.addEventListener("click", async () => {
           retry.disabled = true;
           retry.textContent = "Retrying…";
@@ -214,7 +314,9 @@
           } finally {
             if (document.body.contains(retry) && retry.textContent === "Retrying…") {
               retry.disabled = false;
-              retry.textContent = "Retry / continue";
+              retry.textContent = job.source === "spotify" && job.missing_tracks && job.missing_tracks.length
+                ? "Retry automatic search"
+                : "Retry / continue";
             }
           }
         });
@@ -293,7 +395,7 @@
 
         if (data.kind === "spotify") {
           playlistInput.disabled = true;
-          probeResult.textContent = data.title + " detected · spotDL will use Spotify metadata and match audio from YouTube Music / YouTube";
+          probeResult.textContent = data.title + " detected · spotDL will use Spotify metadata and try YouTube Music, YouTube, Bandcamp, then SoundCloud";
           probeResult.className = "probe good";
         } else if (data.kind === "playlist") {
           const count = data.count ? " · " + data.count + " items" : "";
