@@ -32,7 +32,7 @@ jobs:
             -e MUSIC_ROOT=/tmp/music \
             -e STATE_DIR=/tmp/state \
             -e TEMP_DIR=/tmp/work \
-            yt-dlp-server:test python -c 'import app; u="https://www.youtube.com/playlist?list=OLAK5uy_n5KJL2xyuNKuuMogjJPznLK7ao25VhprU"; assert app.is_youtube_album_playlist(u); assert not app.is_youtube_album_playlist("https://www.youtube.com/playlist?list=PL123"); j={"playlist":True,"album_mode":True,"force":False,"url":u}; cmd=app.build_command(j); assert "%(playlist_channel,playlist_uploader,album_artist,artist|)s:%(album_artist)s" in cmd; m=app._playlist_item_re.match("[download] Downloading item 7 of 21"); assert m and m.groups()==("7","21")'
+            yt-dlp-server:test python -c 'import app; u="https://www.youtube.com/playlist?list=OLAK5uy_n5KJL2xyuNKuuMogjJPznLK7ao25VhprU"; assert app.is_youtube_album_playlist(u); assert not app.is_youtube_album_playlist("https://www.youtube.com/playlist?list=PL123"); info={"entries":[{"uploader":"Artist A - Topic"},{"uploader":"Artist B - Topic"}]}; assert app.infer_album_artist(info)=="Various Artists"; j={"playlist":True,"album_mode":True,"compilation":True,"force":False,"url":u}; cmd=app.build_command(j); assert "Various Artists:%(album_artist)s" in cmd; assert "before_dl:__YTDLP_ITEM__=%(playlist_index|0)s/%(playlist_count|0)s" in cmd; m=app._playlist_item_re.match("[download] Downloading item 7 of 21"); assert m and m.groups()==("7","21")'
       - name: Verify playlist UI defaults and stable progress UI
         run: |
           grep -q 'id="playlist-input" type="checkbox" name="playlist" checked' templates/index.html
