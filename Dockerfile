@@ -3,6 +3,9 @@ FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    HOME=/tmp/yt-dlp-home \
+    XDG_CACHE_HOME=/tmp/yt-dlp-cache \
+    DENO_DIR=/tmp/deno \
     DENO_NO_UPDATE_CHECK=1 \
     DENO_NO_PROMPT=1
 
