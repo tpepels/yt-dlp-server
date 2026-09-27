@@ -31,6 +31,7 @@ if not IMPORT_SUBDIR or Path(IMPORT_SUBDIR).is_absolute() or ".." in Path(IMPORT
 IMPORT_ROOT = MUSIC_ROOT / IMPORT_SUBDIR
 ARCHIVE_FILE = STATE_DIR / "archive.txt"
 SPOTDL_ARCHIVE_FILE = STATE_DIR / "spotdl-archive.txt"
+JOBS_STATE_FILE = STATE_DIR / "jobs.json"
 
 for directory in (IMPORT_ROOT, STATE_DIR, TEMP_DIR):
     directory.mkdir(parents=True, exist_ok=True)
@@ -90,6 +91,128 @@ VERSIONS = {
     ]),
     "spotdl": tool_version(["spotdl", "--version"]),
 }
+
+
+def persist_jobs_locked():
+    """Persist the complete UI/job state atomically. Caller must hold jobs_lock."""
+    payload = {
+        "version": 1,
+        "saved_at": time.time(),
+        "jobs": list(jobs.values()),
+    }
+    tmp_path = JOBS_STATE_FILE.with_suffix(".json.tmp")
+    try:
+        tmp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, JOBS_STATE_FILE)
+    except OSError:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+
+
+def persist_jobs():
+    with jobs_lock:
+        persist_jobs_locked()
+
+
+def normalize_persisted_job(raw):
+    if not isinstance(raw, dict) or not raw.get("url"):
+        return None
+
+    now = time.time()
+    job_id = str(raw.get("id") or uuid.uuid4().hex[:10])
+    status = raw.get("status") if raw.get("status") in {"queued", "running", "succeeded", "failed"} else "failed"
+    source = raw.get("source") or ("spotify" if is_spotify_url(raw["url"]) else "yt-dlp")
+    job = {
+        "id": job_id,
+        "url": str(raw["url"]),
+        "playlist": bool(raw.get("playlist", False)),
+        "album_mode": bool(raw.get("album_mode", False)),
+        "compilation": bool(raw.get("compilation", False)),
+        "force": bool(raw.get("force", False)),
+        "status": status,
+        "message": str(raw.get("message") or "Restored job"),
+        "progress": str(raw.get("progress") or ""),
+        "current_item": int(raw.get("current_item") or 0),
+        "total_items": int(raw.get("total_items") or 0),
+        "completed_items": int(raw.get("completed_items") or 0),
+        "files": list(raw.get("files") or []),
+        "log": list(raw.get("log") or [])[-40:],
+        "created_at": float(raw.get("created_at") or now),
+        "started_at": raw.get("started_at"),
+        "finished_at": raw.get("finished_at"),
+        "returncode": raw.get("returncode"),
+        "http_403": bool(raw.get("http_403", False)),
+        "retry_of": raw.get("retry_of"),
+        "attempt": int(raw.get("attempt") or 1),
+        "source": source,
+        "retry_base_completed": int(raw.get("retry_base_completed") or 0),
+        "failed_items": int(raw.get("failed_items") or 0),
+        "missing_tracks": list(raw.get("missing_tracks") or []),
+        "resolution_of": raw.get("resolution_of"),
+        "spotify_track_url": raw.get("spotify_track_url"),
+        "manual_source_url": raw.get("manual_source_url"),
+        "download_query": raw.get("download_query"),
+    }
+
+    # /api/jobs from older versions intentionally exposed less internal state.
+    # Reconstruct a queued manual-resolution query when possible.
+    if (
+        not job["download_query"]
+        and job["resolution_of"]
+        and job["spotify_track_url"]
+        and job["manual_source_url"]
+    ):
+        job["download_query"] = f'{job["manual_source_url"]}|{job["spotify_track_url"]}'
+
+    # A process that was running when the container stopped cannot still be
+    # running after restart. Preserve it as a retryable interruption instead
+    # of silently starting it again and risking duplicate/forced downloads.
+    if job["status"] == "running":
+        job["status"] = "failed"
+        job["finished_at"] = now
+        job["returncode"] = None
+        job["message"] = "Interrupted by server restart - use Retry / continue"
+        job["log"].append("Server restarted while this job was running.")
+        job["log"] = job["log"][-40:]
+
+    return job
+
+
+def load_persisted_jobs():
+    if not JOBS_STATE_FILE.is_file():
+        return []
+
+    try:
+        raw = json.loads(JOBS_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    items = raw.get("jobs", []) if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return []
+
+    restored = []
+    for item in items:
+        job = normalize_persisted_job(item)
+        if job is not None:
+            restored.append(job)
+
+    restored.sort(key=lambda item: item["created_at"])
+    if len(restored) > MAX_HISTORY:
+        restored = restored[-MAX_HISTORY:]
+
+    with jobs_lock:
+        jobs.clear()
+        for job in restored:
+            jobs[job["id"]] = job
+        persist_jobs_locked()
+
+    return [job["id"] for job in restored if job["status"] == "queued"]
 
 
 def validate_url(value):
