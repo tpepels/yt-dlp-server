@@ -1,3 +1,4 @@
+import json
 import os
 import queue
 import re
@@ -20,6 +21,7 @@ TEMP_DIR = Path(os.getenv("TEMP_DIR", "/data/tmp"))
 COOKIES_FILE = os.getenv("COOKIES_FILE", "").strip()
 MAX_QUEUE = int(os.getenv("MAX_QUEUE", "50"))
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "50"))
+PROBE_TIMEOUT = int(os.getenv("PROBE_TIMEOUT", "30"))
 
 if not IMPORT_SUBDIR or Path(IMPORT_SUBDIR).is_absolute() or ".." in Path(IMPORT_SUBDIR).parts:
     raise RuntimeError("IMPORT_SUBDIR must be a safe relative path")
@@ -79,6 +81,69 @@ def validate_url(value):
     return value, None
 
 
+def cookie_args():
+    if COOKIES_FILE and Path(COOKIES_FILE).is_file():
+        return ["--cookies", COOKIES_FILE]
+    return []
+
+
+def build_probe_command(url):
+    return [
+        "yt-dlp",
+        "--flat-playlist",
+        "--dump-single-json",
+        "--skip-download",
+        "--no-warnings",
+        "--yes-playlist",
+        "--playlist-end",
+        "1",
+        *cookie_args(),
+        url,
+    ]
+
+
+def classify_probe_info(info):
+    entries = info.get("entries")
+    kind = (
+        "playlist"
+        if info.get("_type") in {"playlist", "multi_video"} or isinstance(entries, list)
+        else "single"
+    )
+
+    count = info.get("playlist_count")
+    if not isinstance(count, int) or count < 1:
+        count = None
+
+    return {
+        "kind": kind,
+        "title": info.get("title") or info.get("fulltitle") or "Untitled",
+        "count": count,
+        "extractor": info.get("extractor_key") or info.get("extractor"),
+    }
+
+
+def probe_url(url):
+    completed = subprocess.run(
+        build_probe_command(url),
+        capture_output=True,
+        text=True,
+        timeout=PROBE_TIMEOUT,
+        check=False,
+    )
+
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        message = detail[-1] if detail else f"yt-dlp exited with code {completed.returncode}"
+        raise RuntimeError(message)
+
+    try:
+        info = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("yt-dlp returned invalid probe data") from exc
+
+    return classify_probe_info(info)
+
+
 def build_command(job):
     cmd = [
         "yt-dlp",
@@ -118,9 +183,7 @@ def build_command(job):
     else:
         cmd.extend(["--no-overwrites", "--download-archive", str(ARCHIVE_FILE)])
 
-    if COOKIES_FILE and Path(COOKIES_FILE).is_file():
-        cmd.extend(["--cookies", COOKIES_FILE])
-
+    cmd.extend(cookie_args())
     cmd.append(job["url"])
     return cmd
 
@@ -294,6 +357,23 @@ def download():
         ), 429
 
     return redirect(url_for("index"))
+
+
+@app.post("/api/probe")
+def api_probe():
+    payload = request.get_json(silent=True) or request.form
+    url, error = validate_url(payload.get("url"))
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+
+    try:
+        result = probe_url(url)
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "Link inspection timed out."}), 504
+    except RuntimeError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+
+    return jsonify({"ok": True, **result})
 
 
 @app.get("/api/jobs")
