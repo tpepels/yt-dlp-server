@@ -35,6 +35,10 @@
     .status { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
     .status.succeeded { color:var(--good); } .status.failed { color:var(--bad); } .status.queued { color:var(--wait); } .status.running { color:#8ab4f8; }
     .job-meta { color:var(--muted); margin-top:7px; font-size:13px; }
+    .track-progress { margin-top:10px; }
+    .track-progress-head { display:flex; justify-content:space-between; gap:12px; margin-bottom:5px; color:var(--muted); font-size:12px; }
+    .track-progress-bar { height:6px; overflow:hidden; border-radius:999px; background:#0e1012; }
+    .track-progress-fill { height:100%; width:0; background:#8ab4f8; transition:width .2s ease; }
     details { margin-top:9px; color:var(--muted); } summary { cursor:pointer; }
     pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:8px 0 0; padding:10px; background:#0e1012; border-radius:8px; color:#b7bec4; font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; max-height:260px; overflow:auto; }
     .empty { color:var(--muted); padding:8px 0; }
@@ -83,6 +87,11 @@
 
   function renderJobs(jobs) {
     const root = document.getElementById("jobs");
+    const openLogs = new Set(
+      Array.from(root.querySelectorAll(".job details[open]"))
+        .map((details) => details.closest(".job")?.dataset.jobId)
+        .filter(Boolean)
+    );
     root.replaceChildren();
     if (!jobs.length) {
       const empty = document.createElement("div");
@@ -94,6 +103,7 @@
     for (const job of jobs) {
       const card = document.createElement("article");
       card.className = "job";
+      card.dataset.jobId = job.id;
       const top = document.createElement("div");
       top.className = "job-top";
       const url = document.createElement("div");
@@ -112,8 +122,39 @@
       if (job.playlist) bits.push("playlist");
       meta.textContent = bits.filter(Boolean).join(" · ");
       card.appendChild(meta);
+
+      if (job.total_items > 0) {
+        const completed = Math.min(job.completed_items || 0, job.total_items);
+        const current = Math.min(job.current_item || 0, job.total_items);
+        const progress = document.createElement("div");
+        progress.className = "track-progress";
+
+        const head = document.createElement("div");
+        head.className = "track-progress-head";
+        const saved = document.createElement("span");
+        saved.textContent = completed + "/" + job.total_items + " tracks saved";
+        head.appendChild(saved);
+
+        if (job.status === "running" && current > completed) {
+          const processing = document.createElement("span");
+          processing.textContent = "processing " + current + "/" + job.total_items;
+          head.appendChild(processing);
+        }
+
+        const bar = document.createElement("div");
+        bar.className = "track-progress-bar";
+        const fill = document.createElement("div");
+        fill.className = "track-progress-fill";
+        fill.style.width = ((completed / job.total_items) * 100) + "%";
+        bar.appendChild(fill);
+
+        progress.append(head, bar);
+        card.appendChild(progress);
+      }
+
       if ((job.files && job.files.length) || (job.log && job.log.length)) {
         const details = document.createElement("details");
+        details.open = openLogs.has(job.id);
         const summary = document.createElement("summary");
         summary.textContent = job.files && job.files.length ? "Files and log" : "Log";
         details.appendChild(summary);
@@ -181,7 +222,8 @@
 
         if (data.kind === "playlist") {
           const count = data.count ? " · " + data.count + " items" : "";
-          probeResult.textContent = "Playlist / album detected · " + data.title + count;
+          const albumArtist = data.album_artist ? " · album artist: " + data.album_artist : "";
+          probeResult.textContent = "Playlist / album detected · " + data.title + count + albumArtist;
           probeResult.className = "probe good";
         } else {
           probeResult.textContent = "Single item detected · " + data.title;

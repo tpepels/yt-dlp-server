@@ -7,6 +7,8 @@ Small LAN web interface around [yt-dlp](https://github.com/yt-dlp/yt-dlp). Paste
 - Web UI on port **4545**
 - Automatically probes pasted links before download
 - Shows whether yt-dlp sees a single item or playlist/album, including item count when available
+- Detects YouTube auto-generated album playlists and keeps compilation albums together with a shared Album Artist
+- Shows per-track playlist progress and keeps expanded logs open while the UI refreshes
 - Playlist/album downloading enabled by default
 - One download worker
 - Audio only
@@ -85,6 +87,8 @@ The probe uses yt-dlp in simulation mode with a flat playlist and only the first
 - `Playlist / album detected - ... - N items`
 
 Playlist/album mode is checked by default. If a URL points to a video that is also part of a playlist, yt-dlp is instructed to use the playlist. Uncheck the option if you only want that individual item.
+
+For YouTube's auto-generated album playlists (`OLAK5uy_...`), the preflight inspects the flat track list. Multiple distinct track artists/channels are treated as a compilation and written with `Album Artist = Various Artists`, while the individual track `Artist` tags are preserved. The playlist title is used consistently as the album title. This prevents Plex from splitting one compilation into separate albums per performer.
 
 A failed probe is advisory: the actual download remains available because some extractors may fail lightweight inspection while still working normally.
 

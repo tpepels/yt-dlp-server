@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
@@ -41,8 +41,11 @@ OUTPUT_TEMPLATE = (
 
 jobs = {}
 jobs_lock = threading.Lock()
+probe_cache = {}
+probe_cache_lock = threading.Lock()
 download_queue = queue.Queue(maxsize=MAX_QUEUE)
 _progress_re = re.compile(r"^\[download\]\s+(.+?)(?:\s+of\s+|\s+at\s+|\s+ETA\s+|$)")
+_playlist_item_re = re.compile(r"^\[download\]\s+Downloading item\s+(\d+)\s+of\s+(\d+)")
 
 
 def tool_version(command):
@@ -81,28 +84,98 @@ def validate_url(value):
     return value, None
 
 
+def is_youtube_album_playlist(url):
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+
+    hostname = (parsed.hostname or "").lower()
+    if hostname not in {"youtube.com", "www.youtube.com", "music.youtube.com", "m.youtube.com"}:
+        return False
+
+    playlist_id = parse_qs(parsed.query).get("list", [""])[0]
+    return playlist_id.startswith("OLAK5uy_")
+
+
+def album_playlist_metadata_args(compilation=False):
+    album_artist_source = (
+        "Various Artists"
+        if compilation
+        else "%(playlist_channel,playlist_uploader,album_artist,artist|)s"
+    )
+    return [
+        "--parse-metadata",
+        f"{album_artist_source}:%(album_artist)s",
+        "--replace-in-metadata",
+        "album_artist",
+        r"\s+- Topic$",
+        "",
+        "--parse-metadata",
+        "%(playlist_title,album,playlist|)s:%(album)s",
+        "--parse-metadata",
+        "%(playlist_index)s:%(track_number)s",
+    ]
+
+
 def cookie_args():
     if COOKIES_FILE and Path(COOKIES_FILE).is_file():
         return ["--cookies", COOKIES_FILE]
     return []
 
 
-def build_probe_command(url):
-    return [
+def build_probe_command(url, full_playlist=False):
+    cmd = [
         "yt-dlp",
         "--flat-playlist",
         "--dump-single-json",
         "--skip-download",
         "--no-warnings",
         "--yes-playlist",
-        "--playlist-end",
-        "1",
-        *cookie_args(),
-        url,
     ]
+    if not full_playlist:
+        cmd.extend(["--playlist-end", "1"])
+    cmd.extend(cookie_args())
+    cmd.append(url)
+    return cmd
 
 
-def classify_probe_info(info):
+def normalize_topic_artist(value):
+    value = (value or "").strip()
+    value = re.sub(r"\s+- Topic$", "", value, flags=re.IGNORECASE).strip()
+    if value.lower() in {"youtube", "youtube music"}:
+        return ""
+    return value
+
+
+def infer_album_artist(info):
+    artists = set()
+    for entry in info.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        value = (
+            entry.get("artist")
+            or entry.get("album_artist")
+            or entry.get("uploader")
+            or entry.get("channel")
+        )
+        value = normalize_topic_artist(value)
+        if value:
+            artists.add(value)
+
+    if len(artists) > 1:
+        return "Various Artists"
+    if len(artists) == 1:
+        return next(iter(artists))
+
+    return normalize_topic_artist(
+        info.get("album_artist")
+        or info.get("uploader")
+        or info.get("channel")
+    ) or None
+
+
+def classify_probe_info(info, url=None):
     entries = info.get("entries")
     kind = (
         "playlist"
@@ -112,19 +185,38 @@ def classify_probe_info(info):
 
     count = info.get("playlist_count")
     if not isinstance(count, int) or count < 1:
-        count = None
+        count = len(entries) if isinstance(entries, list) and entries else None
 
+    album_mode = bool(url and is_youtube_album_playlist(url))
     return {
         "kind": kind,
         "title": info.get("title") or info.get("fulltitle") or "Untitled",
         "count": count,
         "extractor": info.get("extractor_key") or info.get("extractor"),
+        "album_mode": album_mode,
+        "album_artist": infer_album_artist(info) if album_mode else None,
     }
+
+
+def cache_probe_result(url, result):
+    with probe_cache_lock:
+        probe_cache[url] = {"timestamp": time.time(), "result": dict(result)}
+
+
+def get_cached_probe_result(url, max_age=600):
+    with probe_cache_lock:
+        cached = probe_cache.get(url)
+        if not cached:
+            return None
+        if time.time() - cached["timestamp"] > max_age:
+            probe_cache.pop(url, None)
+            return None
+        return dict(cached["result"])
 
 
 def probe_url(url):
     completed = subprocess.run(
-        build_probe_command(url),
+        build_probe_command(url, full_playlist=is_youtube_album_playlist(url)),
         capture_output=True,
         text=True,
         timeout=PROBE_TIMEOUT,
@@ -141,7 +233,9 @@ def probe_url(url):
     except json.JSONDecodeError as exc:
         raise RuntimeError("yt-dlp returned invalid probe data") from exc
 
-    return classify_probe_info(info)
+    result = classify_probe_info(info, url=url)
+    cache_probe_result(url, result)
+    return result
 
 
 def build_command(job):
@@ -170,11 +264,15 @@ def build_command(job):
         "--output",
         OUTPUT_TEMPLATE,
         "--print",
+        "before_dl:__YTDLP_ITEM__=%(playlist_index|0)s/%(playlist_count|0)s",
+        "--print",
         "after_move:__YTDLP_FILE__=%(filepath)s",
     ]
 
     if job["playlist"]:
         cmd.append("--yes-playlist")
+        if job["album_mode"]:
+            cmd.extend(album_playlist_metadata_args(job["compilation"]))
     else:
         cmd.append("--no-playlist")
 
@@ -198,11 +296,25 @@ def append_log(job_id, line):
         if not job:
             return
 
+        if line.startswith("__YTDLP_ITEM__="):
+            position = line.split("=", 1)[1]
+            current, separator, total = position.partition("/")
+            if separator and current.isdigit() and total.isdigit():
+                job["current_item"] = int(current)
+                job["total_items"] = int(total)
+            return
+
         if line.startswith("__YTDLP_FILE__="):
             filepath = line.split("=", 1)[1]
             job["files"].append(filepath)
+            job["completed_items"] += 1
             job["message"] = f"Saved {Path(filepath).name}"
             return
+
+        playlist_match = _playlist_item_re.match(line)
+        if playlist_match:
+            job["current_item"] = int(playlist_match.group(1))
+            job["total_items"] = int(playlist_match.group(2))
 
         match = _progress_re.match(line)
         if match:
@@ -282,7 +394,12 @@ def public_jobs():
                 "message": job["message"],
                 "progress": job["progress"],
                 "playlist": job["playlist"],
+                "album_mode": job["album_mode"],
+                "compilation": job["compilation"],
                 "force": job["force"],
+                "current_item": job["current_item"],
+                "total_items": job["total_items"],
+                "completed_items": job["completed_items"],
                 "files": list(job["files"]),
                 "log": list(job["log"]),
                 "created_at": job["created_at"],
@@ -316,15 +433,39 @@ def download():
             error=error,
         ), 400
 
+    playlist_enabled = request.form.get("playlist") == "on"
+    album_mode = playlist_enabled and is_youtube_album_playlist(url)
+    probe_result = get_cached_probe_result(url) if album_mode else None
+    if album_mode and probe_result is None:
+        try:
+            probe_result = probe_url(url)
+        except (subprocess.TimeoutExpired, RuntimeError):
+            probe_result = None
+
+    compilation = bool(
+        probe_result
+        and probe_result.get("album_artist") == "Various Artists"
+    )
+    expected_count = (
+        probe_result.get("count")
+        if probe_result and isinstance(probe_result.get("count"), int)
+        else 0
+    )
+
     job_id = uuid.uuid4().hex[:10]
     job = {
         "id": job_id,
         "url": url,
-        "playlist": request.form.get("playlist") == "on",
+        "playlist": playlist_enabled,
+        "album_mode": album_mode,
+        "compilation": compilation,
         "force": request.form.get("force") == "on",
         "status": "queued",
         "message": "Waiting for worker",
         "progress": "",
+        "current_item": 0,
+        "total_items": expected_count,
+        "completed_items": 0,
         "files": [],
         "log": [],
         "created_at": time.time(),
