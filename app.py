@@ -43,6 +43,7 @@ jobs = {}
 jobs_lock = threading.Lock()
 download_queue = queue.Queue(maxsize=MAX_QUEUE)
 _progress_re = re.compile(r"^\[download\]\s+(.+?)(?:\s+of\s+|\s+at\s+|\s+ETA\s+|$)")
+_playlist_item_re = re.compile(r"^\[download\]\s+Downloading item\s+(\d+)\s+of\s+(\d+)")
 
 
 def tool_version(command):
