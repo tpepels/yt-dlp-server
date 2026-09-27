@@ -78,6 +78,7 @@
   let probeTimer = null;
   let probeController = null;
   let probedUrl = "";
+  let probingUrl = "";
   let probeInFlight = null;
 
   function renderJobs(jobs) {
@@ -150,14 +151,16 @@
       return false;
     }
 
+    if (probeInFlight && probingUrl === url) return probeInFlight;
     if (probeController) probeController.abort();
-    probeController = new AbortController();
 
+    probeController = new AbortController();
+    probingUrl = url;
     probeResult.textContent = "Checking link…";
     probeResult.className = "probe";
     downloadButton.disabled = true;
 
-    probeInFlight = (async () => {
+    const currentProbe = (async () => {
       try {
         const response = await fetch("/api/probe", {
           method: "POST",
@@ -194,11 +197,16 @@
         }
         return true;
       } finally {
+        if (probeInFlight === currentProbe) {
+          probeInFlight = null;
+          probingUrl = "";
+        }
         if (urlInput.value.trim() === url) downloadButton.disabled = false;
       }
     })();
 
-    return probeInFlight;
+    probeInFlight = currentProbe;
+    return currentProbe;
   }
 
   urlInput.addEventListener("input", () => {
@@ -217,12 +225,7 @@
 
     event.preventDefault();
     clearTimeout(probeTimer);
-
-    if (probeInFlight) {
-      await probeInFlight;
-    } else {
-      await probeUrl(url);
-    }
+    await probeUrl(url);
 
     if (urlInput.value.trim() === url) form.requestSubmit();
   });
