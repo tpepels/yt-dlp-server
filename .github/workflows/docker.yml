@@ -23,6 +23,7 @@ jobs:
           docker run --rm yt-dlp-server:test yt-dlp --version
           docker run --rm yt-dlp-server:test deno --version
           docker run --rm yt-dlp-server:test ffmpeg -version
+          docker run --rm yt-dlp-server:test sh -c 'spotdl --version | grep -qx 4.5.2'
           docker run --rm yt-dlp-server:test python -c "import importlib.metadata; assert importlib.metadata.version('bgutil-ytdlp-pot-provider') == '2.0.0'"
           docker run --rm --user 1000:1000 yt-dlp-server:test sh -c 'test -f /opt/bgutil-ytdlp-pot-provider/server/src/generate_once.ts && deno run --allow-env --allow-net --allow-ffi=/opt/bgutil-ytdlp-pot-provider/server/node_modules --allow-write=/tmp/yt-dlp-cache/bgutil-ytdlp-pot-provider --allow-read=/tmp/yt-dlp-cache/bgutil-ytdlp-pot-provider,/opt/bgutil-ytdlp-pot-provider/server/node_modules /opt/bgutil-ytdlp-pot-provider/server/src/generate_once.ts --version | grep -qx 2.0.0'
       - name: Validate non-root runtime, naming and playlist classification
@@ -50,6 +51,8 @@ jobs:
           grep -q 'minmax(0,1fr)' templates/index.html
           grep -q 'overflow-x:hidden' templates/index.html
           grep -q 'PO bgutil' templates/index.html
+          grep -q 'Spotify via spotDL' templates/index.html
+          grep -q 'versions.spotdl' templates/index.html
           grep -q 'Retry / continue' templates/index.html
           grep -q '/api/jobs/' templates/index.html
       - name: Validate failed-job retry continuation
@@ -59,6 +62,13 @@ jobs:
             -e STATE_DIR=/tmp/state \
             -e TEMP_DIR=/tmp/work \
             yt-dlp-server:test python -c 'import queue, time, app; app.download_queue=queue.Queue(maxsize=5); app.jobs.clear(); app.jobs["old"]={"id":"old","url":"https://youtube.com/playlist?list=PL123","playlist":True,"album_mode":False,"compilation":False,"force":False,"status":"failed","message":"failed","progress":"100%","current_item":2,"total_items":21,"completed_items":1,"files":["/data/music/a.opus"],"log":[],"created_at":time.time(),"started_at":None,"finished_at":time.time(),"returncode":1,"http_403":True,"retry_of":None,"attempt":1}; client=app.app.test_client(); r=client.post("/api/jobs/old/retry"); assert r.status_code==202, r.data; new_id=r.get_json()["job_id"]; new=app.jobs[new_id]; assert new["status"]=="queued"; assert new["completed_items"]==1 and new["total_items"]==21; assert new["files"]==["/data/music/a.opus"]; assert new["force"] is False; assert new["retry_of"]=="old" and new["attempt"]==2; assert client.post("/api/jobs/old/retry").status_code==409'
+      - name: Validate Spotify spotDL integration
+        run: |
+          docker run --rm --user 1000:1000 \
+            -e MUSIC_ROOT=/tmp/music \
+            -e STATE_DIR=/tmp/state \
+            -e TEMP_DIR=/tmp/work \
+            yt-dlp-server:test python -c 'import time, app; u="https://open.spotify.com/album/4yP0hdKOZPNshxUOjY0cZj"; assert app.is_spotify_url(u); assert app.spotify_link_type(u)=="album"; j={"id":"sp1","url":u,"force":False}; cmd=app.build_spotdl_command(j); assert cmd[:3]==["spotdl","download",u]; assert "--archive" in cmd and str(app.SPOTDL_ARCHIVE_FILE) in cmd; assert "--format" in cmd and "opus" in cmd; assert "--bitrate" in cmd and "disable" in cmd; assert app.SPOTDL_OUTPUT_TEMPLATE.endswith("{track-number} - {title} [{track-id}].{output-ext}"); assert "youtube:player_client=mweb" in app.spotdl_ytdlp_args(); assert "youtubepot-bgutilscript:server_home=" in app.spotdl_ytdlp_args(); force=app.build_spotdl_command({"id":"sp2","url":u,"force":True}); assert "--archive" not in force; assert force[force.index("--overwrite")+1]=="force"; app.jobs.clear(); app.jobs["sp"]={"id":"sp","source":"spotify","completed_items":0,"total_items":0,"current_item":0,"retry_base_completed":0,"message":"","progress":"","files":[],"log":[],"http_403":False}; app.append_log("sp","INFO: 1/8 complete"); assert app.jobs["sp"]["total_items"]==8 and app.jobs["sp"]["current_item"]==1; app.append_log("sp", "INFO: Downloaded \"Artist - Track\": https://youtube.com/watch?v=x"); assert app.jobs["sp"]["completed_items"]==1; client=app.app.test_client(); p=client.post("/api/probe", json={"url":u}); assert p.status_code==200 and p.get_json()["kind"]=="spotify"'
       - name: Validate YouTube PO-token command wiring
         run: |
           docker run --rm --user 1000:1000 \
