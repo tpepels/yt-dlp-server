@@ -347,8 +347,9 @@ def append_log(job_id, line):
 
         if line.startswith("__YTDLP_FILE__="):
             filepath = line.split("=", 1)[1]
-            job["files"].append(filepath)
-            job["completed_items"] += 1
+            if filepath not in job["files"]:
+                job["files"].append(filepath)
+                job["completed_items"] += 1
             job["message"] = f"Saved {Path(filepath).name}"
             return
 
@@ -458,6 +459,8 @@ def public_jobs():
                 "finished_at": job["finished_at"],
                 "returncode": job["returncode"],
                 "http_403": job["http_403"],
+                "retry_of": job["retry_of"],
+                "attempt": job["attempt"],
             }
             for job in ordered
         ]
@@ -525,6 +528,8 @@ def download():
         "finished_at": None,
         "returncode": None,
         "http_403": False,
+        "retry_of": None,
+        "attempt": 1,
     }
 
     with jobs_lock:
@@ -551,6 +556,62 @@ def download():
         ), 429
 
     return redirect(url_for("index"))
+
+
+@app.post("/api/jobs/<job_id>/retry")
+def retry_job(job_id):
+    with jobs_lock:
+        previous = jobs.get(job_id)
+        if previous is None:
+            return jsonify({"ok": False, "error": "Job not found."}), 404
+        if previous["status"] != "failed":
+            return jsonify({"ok": False, "error": "Only failed jobs can be retried."}), 409
+        if any(job.get("retry_of") == job_id for job in jobs.values()):
+            return jsonify({
+                "ok": False,
+                "error": "This attempt has already been retried. Retry the latest failed attempt instead.",
+            }), 409
+
+        retry_id = uuid.uuid4().hex[:10]
+        completed = min(previous["completed_items"], previous["total_items"]) if previous["total_items"] else previous["completed_items"]
+        retry = {
+            "id": retry_id,
+            "url": previous["url"],
+            "playlist": previous["playlist"],
+            "album_mode": previous["album_mode"],
+            "compilation": previous["compilation"],
+            # A retry is a continuation: never overwrite files that already succeeded.
+            "force": False,
+            "status": "queued",
+            "message": (
+                f"Continuing after {completed}/{previous['total_items']} tracks"
+                if previous["total_items"]
+                else "Retry queued"
+            ),
+            "progress": "",
+            "current_item": completed,
+            "total_items": previous["total_items"],
+            "completed_items": completed,
+            "files": list(previous["files"]),
+            "log": [f"Retrying failed job {job_id}; existing files and archive entries will be skipped."],
+            "created_at": time.time(),
+            "started_at": None,
+            "finished_at": None,
+            "returncode": None,
+            "http_403": False,
+            "retry_of": job_id,
+            "attempt": previous.get("attempt", 1) + 1,
+        }
+        jobs[retry_id] = retry
+
+    try:
+        download_queue.put_nowait(retry_id)
+    except queue.Full:
+        with jobs_lock:
+            jobs.pop(retry_id, None)
+        return jsonify({"ok": False, "error": "Download queue is full."}), 429
+
+    return jsonify({"ok": True, "job_id": retry_id}), 202
 
 
 @app.post("/api/probe")
