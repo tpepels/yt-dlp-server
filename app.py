@@ -96,10 +96,15 @@ def is_youtube_album_playlist(url):
     return playlist_id.startswith("OLAK5uy_")
 
 
-def album_playlist_metadata_args():
+def album_playlist_metadata_args(compilation=False):
+    album_artist_source = (
+        "Various Artists"
+        if compilation
+        else "%(playlist_channel,playlist_uploader,album_artist,artist|)s"
+    )
     return [
         "--parse-metadata",
-        "%(playlist_channel,playlist_uploader,album_artist,artist|)s:%(album_artist)s",
+        f"{album_artist_source}:%(album_artist)s",
         "--replace-in-metadata",
         "album_artist",
         r"\s+- Topic$",
@@ -115,22 +120,58 @@ def cookie_args():
     return []
 
 
-def build_probe_command(url):
-    return [
+def build_probe_command(url, full_playlist=False):
+    cmd = [
         "yt-dlp",
         "--flat-playlist",
         "--dump-single-json",
         "--skip-download",
         "--no-warnings",
         "--yes-playlist",
-        "--playlist-end",
-        "1",
-        *cookie_args(),
-        url,
     ]
+    if not full_playlist:
+        cmd.extend(["--playlist-end", "1"])
+    cmd.extend(cookie_args())
+    cmd.append(url)
+    return cmd
 
 
-def classify_probe_info(info):
+def normalize_topic_artist(value):
+    value = (value or "").strip()
+    value = re.sub(r"\s+- Topic$", "", value, flags=re.IGNORECASE).strip()
+    if value.lower() in {"youtube", "youtube music"}:
+        return ""
+    return value
+
+
+def infer_album_artist(info):
+    artists = set()
+    for entry in info.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        value = (
+            entry.get("artist")
+            or entry.get("album_artist")
+            or entry.get("uploader")
+            or entry.get("channel")
+        )
+        value = normalize_topic_artist(value)
+        if value:
+            artists.add(value)
+
+    if len(artists) > 1:
+        return "Various Artists"
+    if len(artists) == 1:
+        return next(iter(artists))
+
+    return normalize_topic_artist(
+        info.get("album_artist")
+        or info.get("uploader")
+        or info.get("channel")
+    ) or None
+
+
+def classify_probe_info(info, url=None):
     entries = info.get("entries")
     kind = (
         "playlist"
@@ -142,17 +183,20 @@ def classify_probe_info(info):
     if not isinstance(count, int) or count < 1:
         count = None
 
+    album_mode = bool(url and is_youtube_album_playlist(url))
     return {
         "kind": kind,
         "title": info.get("title") or info.get("fulltitle") or "Untitled",
         "count": count,
         "extractor": info.get("extractor_key") or info.get("extractor"),
+        "album_mode": album_mode,
+        "album_artist": infer_album_artist(info) if album_mode else None,
     }
 
 
 def probe_url(url):
     completed = subprocess.run(
-        build_probe_command(url),
+        build_probe_command(url, full_playlist=is_youtube_album_playlist(url)),
         capture_output=True,
         text=True,
         timeout=PROBE_TIMEOUT,
@@ -169,7 +213,7 @@ def probe_url(url):
     except json.JSONDecodeError as exc:
         raise RuntimeError("yt-dlp returned invalid probe data") from exc
 
-    return classify_probe_info(info)
+    return classify_probe_info(info, url=url)
 
 
 def build_command(job):
@@ -206,7 +250,7 @@ def build_command(job):
     if job["playlist"]:
         cmd.append("--yes-playlist")
         if job["album_mode"]:
-            cmd.extend(album_playlist_metadata_args())
+            cmd.extend(album_playlist_metadata_args(job["compilation"]))
     else:
         cmd.append("--no-playlist")
 
