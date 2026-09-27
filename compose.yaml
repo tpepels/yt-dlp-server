@@ -1,0 +1,21 @@
+services:
+  yt-dlp-server:
+    build: .
+    container_name: yt-dlp-server
+    user: "${UID:-1000}:${GID:-1000}"
+    ports:
+      - "4545:4545"
+    environment:
+      TZ: ${TZ:-Europe/Lisbon}
+      PORT: 4545
+      MUSIC_ROOT: /data/music
+      IMPORT_SUBDIR: YT-DLP Imports
+      STATE_DIR: /data/state
+      TEMP_DIR: /data/tmp
+      # Optional:
+      # COOKIES_FILE: /data/state/cookies.txt
+    volumes:
+      - /srv/completed/music:/data/music
+      - /srv/yt-dlp-server/state:/data/state
+      - /srv/yt-dlp-server/tmp:/data/tmp
+    restart: unless-stopped
