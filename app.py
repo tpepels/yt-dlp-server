@@ -409,7 +409,7 @@ def build_spotdl_command(job):
     cmd = [
         "spotdl",
         "download",
-        job.get("download_query", job["url"]),
+        job.get("download_query") or job["url"],
         "--simple-tui",
         "--headless",
         "--log-level",
