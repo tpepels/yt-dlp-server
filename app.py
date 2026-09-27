@@ -22,6 +22,8 @@ COOKIES_FILE = os.getenv("COOKIES_FILE", "").strip()
 MAX_QUEUE = int(os.getenv("MAX_QUEUE", "50"))
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "50"))
 PROBE_TIMEOUT = int(os.getenv("PROBE_TIMEOUT", "30"))
+BGUTIL_SERVER_HOME = Path(os.getenv("BGUTIL_SERVER_HOME", "/opt/bgutil-ytdlp-pot-provider/server"))
+YOUTUBE_PLAYER_CLIENT = os.getenv("YOUTUBE_PLAYER_CLIENT", "mweb").strip() or "mweb"
 
 if not IMPORT_SUBDIR or Path(IMPORT_SUBDIR).is_absolute() or ".." in Path(IMPORT_SUBDIR).parts:
     raise RuntimeError("IMPORT_SUBDIR must be a safe relative path")
@@ -66,6 +68,11 @@ VERSIONS = {
     "yt_dlp": tool_version(["yt-dlp", "--version"]),
     "ffmpeg": tool_version(["ffmpeg", "-version"]),
     "deno": tool_version(["deno", "--version"]),
+    "bgutil": tool_version([
+        "python",
+        "-c",
+        "import importlib.metadata; print(importlib.metadata.version('bgutil-ytdlp-pot-provider'))",
+    ]),
 }
 
 
@@ -84,18 +91,47 @@ def validate_url(value):
     return value, None
 
 
-def is_youtube_album_playlist(url):
+def is_youtube_url(url):
     try:
         parsed = urlparse(url)
     except ValueError:
         return False
 
     hostname = (parsed.hostname or "").lower()
-    if hostname not in {"youtube.com", "www.youtube.com", "music.youtube.com", "m.youtube.com"}:
+    return hostname in {
+        "youtube.com",
+        "www.youtube.com",
+        "music.youtube.com",
+        "m.youtube.com",
+        "youtu.be",
+    }
+
+
+def is_youtube_album_playlist(url):
+    if not is_youtube_url(url):
         return False
 
+    parsed = urlparse(url)
     playlist_id = parse_qs(parsed.query).get("list", [""])[0]
     return playlist_id.startswith("OLAK5uy_")
+
+
+def youtube_extractor_args(url):
+    if not is_youtube_url(url):
+        return []
+
+    args = [
+        "--extractor-args",
+        f"youtube:player_client={YOUTUBE_PLAYER_CLIENT}",
+    ]
+
+    if BGUTIL_SERVER_HOME.is_dir():
+        args.extend([
+            "--extractor-args",
+            f"youtubepot-bgutilscript:server_home={BGUTIL_SERVER_HOME}",
+        ])
+
+    return args
 
 
 def album_playlist_metadata_args(compilation=False):
@@ -135,6 +171,7 @@ def build_probe_command(url, full_playlist=False):
     ]
     if not full_playlist:
         cmd.extend(["--playlist-end", "1"])
+    cmd.extend(youtube_extractor_args(url))
     cmd.extend(cookie_args())
     cmd.append(url)
     return cmd
@@ -281,6 +318,7 @@ def build_command(job):
     else:
         cmd.extend(["--no-overwrites", "--download-archive", str(ARCHIVE_FILE)])
 
+    cmd.extend(youtube_extractor_args(job["url"]))
     cmd.extend(cookie_args())
     cmd.append(job["url"])
     return cmd
@@ -295,6 +333,9 @@ def append_log(job_id, line):
         job = jobs.get(job_id)
         if not job:
             return
+
+        if "HTTP Error 403: Forbidden" in line:
+            job["http_403"] = True
 
         if line.startswith("__YTDLP_ITEM__="):
             position = line.split("=", 1)[1]
@@ -361,7 +402,17 @@ def run_job(job_id):
                     job["message"] = "Completed - nothing new to download"
             else:
                 job["status"] = "failed"
-                job["message"] = f"yt-dlp exited with code {returncode}"
+                if job["http_403"] and is_youtube_url(job["url"]):
+                    if BGUTIL_SERVER_HOME.is_dir():
+                        job["message"] = (
+                            "YouTube returned HTTP 403 despite PO-token support"
+                        )
+                    else:
+                        job["message"] = (
+                            "YouTube returned HTTP 403 - PO-token provider unavailable"
+                        )
+                else:
+                    job["message"] = f"yt-dlp exited with code {returncode}"
     except Exception as exc:
         with jobs_lock:
             job = jobs[job_id]
@@ -406,6 +457,7 @@ def public_jobs():
                 "started_at": job["started_at"],
                 "finished_at": job["finished_at"],
                 "returncode": job["returncode"],
+                "http_403": job["http_403"],
             }
             for job in ordered
         ]
@@ -472,6 +524,7 @@ def download():
         "started_at": None,
         "finished_at": None,
         "returncode": None,
+        "http_403": False,
     }
 
     with jobs_lock:
@@ -530,6 +583,11 @@ def health():
             "queue": download_queue.qsize(),
             "import_root": str(IMPORT_ROOT),
             "versions": VERSIONS,
+            "youtube_po": {
+                "available": BGUTIL_SERVER_HOME.is_dir(),
+                "server_home": str(BGUTIL_SERVER_HOME),
+                "player_client": YOUTUBE_PLAYER_CLIENT,
+            },
         }
     )
 
