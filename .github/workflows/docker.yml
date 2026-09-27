@@ -46,6 +46,15 @@ jobs:
           grep -q 'minmax(0,1fr)' templates/index.html
           grep -q 'overflow-x:hidden' templates/index.html
           grep -q 'PO bgutil' templates/index.html
+          grep -q 'Retry / continue' templates/index.html
+          grep -q '/api/jobs/' templates/index.html
+      - name: Validate failed-job retry continuation
+        run: |
+          docker run --rm --user 1000:1000 \
+            -e MUSIC_ROOT=/tmp/music \
+            -e STATE_DIR=/tmp/state \
+            -e TEMP_DIR=/tmp/work \
+            yt-dlp-server:test python -c 'import queue, time, app; app.download_queue=queue.Queue(maxsize=5); app.jobs.clear(); app.jobs["old"]={"id":"old","url":"https://youtube.com/playlist?list=PL123","playlist":True,"album_mode":False,"compilation":False,"force":False,"status":"failed","message":"failed","progress":"100%","current_item":2,"total_items":21,"completed_items":1,"files":["/data/music/a.opus"],"log":[],"created_at":time.time(),"started_at":None,"finished_at":time.time(),"returncode":1,"http_403":True,"retry_of":None,"attempt":1}; client=app.app.test_client(); r=client.post("/api/jobs/old/retry"); assert r.status_code==202, r.data; new_id=r.get_json()["job_id"]; new=app.jobs[new_id]; assert new["status"]=="queued"; assert new["completed_items"]==1 and new["total_items"]==21; assert new["files"]==["/data/music/a.opus"]; assert new["force"] is False; assert new["retry_of"]=="old" and new["attempt"]==2; assert client.post("/api/jobs/old/retry").status_code==409'
       - name: Validate YouTube PO-token command wiring
         run: |
           docker run --rm --user 1000:1000 \
