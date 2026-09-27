@@ -222,7 +222,8 @@
 
         if (data.kind === "playlist") {
           const count = data.count ? " · " + data.count + " items" : "";
-          probeResult.textContent = "Playlist / album detected · " + data.title + count;
+          const albumArtist = data.album_artist ? " · album artist: " + data.album_artist : "";
+          probeResult.textContent = "Playlist / album detected · " + data.title + count + albumArtist;
           probeResult.className = "probe good";
         } else {
           probeResult.textContent = "Single item detected · " + data.title;
