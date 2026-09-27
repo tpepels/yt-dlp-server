@@ -185,7 +185,7 @@ def spotdl_ytdlp_args():
 
 
 def spotdl_error_file(job_id):
-    return STATE_DIR / f"spotdl-errors-{job_id}.log"
+    return TEMP_DIR / f"spotdl-errors-{job_id}.log"
 
 
 def album_playlist_metadata_args(compilation=False):
@@ -513,6 +513,10 @@ def run_job(job_id):
                 if not error_line or re.fullmatch(r"\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}", error_line):
                     continue
                 spotdl_errors.append(error_line)
+            try:
+                error_file.unlink()
+            except OSError:
+                pass
 
         with jobs_lock:
             job = jobs[job_id]
