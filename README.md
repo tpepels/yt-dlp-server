@@ -1,11 +1,13 @@
 # yt-dlp music server
 
-Small LAN web interface around [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [spotDL](https://github.com/spotDL/spotify-downloader). Paste a media URL, queue an audio-only download, and write the result into a Plex-friendly music tree. Spotify URLs use Spotify metadata while spotDL matches the audio from YouTube Music / YouTube.
+Small LAN web interface around [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [spotDL](https://github.com/spotDL/spotify-downloader). Paste a media URL, queue an audio-only download, and write the result into a Plex-friendly music tree. Spotify URLs use Spotify metadata while spotDL matches audio from YouTube Music, YouTube, Bandcamp, then SoundCloud.
 
 ## What it does
 
 - Web UI on port **4545**
 - Spotify tracks, albums, playlists and artists via spotDL 4.5.2
+- Automatic Spotify audio fallback: YouTube Music -> YouTube -> Bandcamp -> SoundCloud
+- Manual missing-track resolver using a direct YouTube, Bandcamp or SoundCloud URL while preserving Spotify metadata
 - Automatically probes pasted links before download
 - Shows whether yt-dlp sees a single item or playlist/album, including item count when available
 - Detects YouTube auto-generated album playlists and keeps compilation albums together with a shared Album Artist
@@ -83,7 +85,7 @@ Open `http://YOUR-SERVER-IP:4545`.
 
 Spotify URLs are routed through **spotDL 4.5.2** automatically. No separate page or service is required.
 
-For public Spotify track, album, playlist and artist URLs, spotDL retrieves the Spotify metadata, searches YouTube Music first with YouTube as fallback, downloads audio only, and embeds the Spotify metadata and cover art. spotDL does **not** download the audio stream from Spotify itself.
+For public Spotify track, album, playlist and artist URLs, spotDL retrieves the Spotify metadata, searches YouTube Music first, then YouTube, Bandcamp and SoundCloud as fallbacks, downloads audio only, and embeds the Spotify metadata and cover art. spotDL does **not** download the audio stream from Spotify itself.
 
 Spotify output uses:
 
@@ -100,10 +102,12 @@ The downloader uses:
 - Spotify album artist, album, track number, title, artwork and other embedded metadata;
 - a persistent archive at `/data/state/spotdl-archive.txt`;
 - the existing YouTube BgUtils PO-token configuration through spotDL's `--yt-dlp-args` passthrough;
-- YouTube Music as the first audio match provider, with YouTube as fallback;
+- YouTube Music as the first audio match provider, then YouTube, Bandcamp and SoundCloud as fallbacks;
 - no lyrics providers.
 
-The normal **Ignore archive and overwrite existing file** option also applies to Spotify. When unchecked, completed Spotify tracks are recorded in the spotDL archive. A failed partial job can therefore use **Retry / continue** and only the missing tracks are attempted again.
+The normal **Ignore archive and overwrite existing file** option also applies to Spotify. When unchecked, completed Spotify tracks are recorded in the spotDL archive. A failed partial job can therefore use **Retry automatic search** and only the missing tracks are attempted again.
+
+When every automatic provider fails for a specific Spotify track, the failed job exposes that track separately. Paste a direct YouTube watch URL, Bandcamp track URL or SoundCloud track URL into **Resolve track**. The server sends spotDL its supported manual mapping form, `SOURCE_URL|SPOTIFY_TRACK_URL`, so the chosen source supplies the audio while the original Spotify track still supplies the metadata and cover art. A successful manual resolution is added to the spotDL archive and upgrades the original partial album job to completed once all missing tracks are resolved.
 
 spotDL's own processed counter includes failed tracks, so the web UI does not call that value "saved." Saved-track progress is counted separately from successful downloads/existing files, while spotDL's counter is only used to establish the collection size and processing position.
 

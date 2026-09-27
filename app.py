@@ -58,6 +58,7 @@ _playlist_item_re = re.compile(r"^\[download\]\s+Downloading item\s+(\d+)\s+of\s
 _spotdl_progress_re = re.compile(r"(\d+)/(\d+) complete")
 _spotdl_downloaded_re = re.compile(r'\bDownloaded "')
 _spotdl_existing_re = re.compile(r"\bSkipping .+\(file already exists\)")
+_spotify_track_url_re = re.compile(r"https://open\.spotify\.com/track/[A-Za-z0-9]+(?:\?[^\s]*)?")
 _ansi_re = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -189,6 +190,78 @@ def spotdl_ytdlp_args():
 
 def spotdl_error_file(job_id):
     return TEMP_DIR / f"spotdl-errors-{job_id}.log"
+
+
+def extract_spotdl_missing_tracks(errors):
+    missing = []
+    seen = set()
+    for error in errors:
+        if "No results found for song:" not in error:
+            continue
+        match = _spotify_track_url_re.search(error)
+        if not match:
+            continue
+        spotify_url = match.group(0)
+        if spotify_url in seen:
+            continue
+        label = error.split("No results found for song:", 1)[1].strip() or spotify_url
+        missing.append({
+            "spotify_url": spotify_url,
+            "label": label,
+            "resolved": False,
+            "source_url": None,
+        })
+        seen.add(spotify_url)
+    return missing
+
+
+def is_manual_spotify_source_url(value):
+    url, error = validate_url(value)
+    if error:
+        return False
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    if hostname == "youtu.be":
+        return True
+    if hostname in {"youtube.com", "www.youtube.com", "music.youtube.com", "m.youtube.com"}:
+        return "watch" in parsed.path and bool(parse_qs(parsed.query).get("v"))
+    if hostname == "soundcloud.com" or hostname.endswith(".soundcloud.com"):
+        return True
+    if hostname == "bandcamp.com" or hostname.endswith(".bandcamp.com"):
+        return True
+    return False
+
+
+def apply_manual_resolution_success(job):
+    parent_id = job.get("resolution_of")
+    spotify_url = job.get("spotify_track_url")
+    source_url = job.get("manual_source_url")
+    if not parent_id or not spotify_url:
+        return
+
+    parent = jobs.get(parent_id)
+    if not parent:
+        return
+
+    for missing in parent.get("missing_tracks", []):
+        if missing.get("spotify_url") == spotify_url:
+            missing["resolved"] = True
+            missing["source_url"] = source_url
+
+    unresolved = [item for item in parent.get("missing_tracks", []) if not item.get("resolved")]
+    if not unresolved and parent.get("missing_tracks"):
+        parent["status"] = "succeeded"
+        parent["failed_items"] = 0
+        if parent.get("total_items"):
+            parent["completed_items"] = parent["total_items"]
+            parent["current_item"] = parent["total_items"]
+            parent["progress"] = ""
+            parent["message"] = f"Completed - {parent['total_items']}/{parent['total_items']} tracks saved"
+        else:
+            parent["completed_items"] += 1
+            parent["message"] = "Completed - missing track resolved manually"
+        parent["log"].append(f"Resolved {spotify_url} from {source_url}")
+        parent["log"] = parent["log"][-40:]
 
 
 def album_playlist_metadata_args(compilation=False):
@@ -336,7 +409,7 @@ def build_spotdl_command(job):
     cmd = [
         "spotdl",
         "download",
-        job["url"],
+        job.get("download_query") or job["url"],
         "--simple-tui",
         "--headless",
         "--log-level",
@@ -360,6 +433,8 @@ def build_spotdl_command(job):
         "--audio",
         "youtube-music",
         "youtube",
+        "bandcamp",
+        "soundcloud",
         "--yt-dlp-args",
         spotdl_ytdlp_args(),
     ]
@@ -521,11 +596,14 @@ def run_job(job_id):
             except OSError:
                 pass
 
+        spotdl_missing_tracks = extract_spotdl_missing_tracks(spotdl_errors)
+
         with jobs_lock:
             job = jobs[job_id]
             job["returncode"] = returncode
             job["finished_at"] = time.time()
             job["failed_items"] = len(spotdl_errors)
+            job["missing_tracks"] = spotdl_missing_tracks
             if spotdl_errors:
                 job["log"].append("spotDL errors:")
                 job["log"].extend(spotdl_errors[-20:])
@@ -541,6 +619,7 @@ def run_job(job_id):
                         job["message"] = f"Completed - {job['completed_items']} tracks saved"
                     else:
                         job["message"] = "Completed - nothing new to download"
+                    apply_manual_resolution_success(job)
                 elif job["files"]:
                     count = len(job["files"])
                     job["message"] = f"Completed - {count} file{'s' if count != 1 else ''}"
@@ -611,6 +690,10 @@ def public_jobs():
                 "attempt": job["attempt"],
                 "source": job.get("source", "yt-dlp"),
                 "failed_items": job.get("failed_items", 0),
+                "missing_tracks": [dict(item) for item in job.get("missing_tracks", [])],
+                "resolution_of": job.get("resolution_of"),
+                "spotify_track_url": job.get("spotify_track_url"),
+                "manual_source_url": job.get("manual_source_url"),
             }
             for job in ordered
         ]
@@ -684,6 +767,11 @@ def download():
         "source": source,
         "retry_base_completed": 0,
         "failed_items": 0,
+        "missing_tracks": [],
+        "resolution_of": None,
+        "spotify_track_url": None,
+        "manual_source_url": None,
+        "download_query": None,
     }
 
     with jobs_lock:
@@ -758,6 +846,11 @@ def retry_job(job_id):
             "source": previous.get("source", "yt-dlp"),
             "retry_base_completed": completed,
             "failed_items": 0,
+            "missing_tracks": [],
+            "resolution_of": None,
+            "spotify_track_url": None,
+            "manual_source_url": None,
+            "download_query": None,
         }
         jobs[retry_id] = retry
 
@@ -769,6 +862,87 @@ def retry_job(job_id):
         return jsonify({"ok": False, "error": "Download queue is full."}), 429
 
     return jsonify({"ok": True, "job_id": retry_id}), 202
+
+
+@app.post("/api/jobs/<job_id>/resolve")
+def resolve_missing_spotify_track(job_id):
+    payload = request.get_json(silent=True) or request.form
+    spotify_url = (payload.get("spotify_url") or "").strip()
+    source_url = (payload.get("source_url") or "").strip()
+
+    if not spotify_url or not is_spotify_url(spotify_url) or spotify_link_type(spotify_url) != "track":
+        return jsonify({"ok": False, "error": "A valid Spotify track URL is required."}), 400
+    if not is_manual_spotify_source_url(source_url):
+        return jsonify({
+            "ok": False,
+            "error": "Use a direct YouTube watch, Bandcamp track, or SoundCloud track URL.",
+        }), 400
+
+    with jobs_lock:
+        parent = jobs.get(job_id)
+        if parent is None:
+            return jsonify({"ok": False, "error": "Job not found."}), 404
+        if parent.get("source") != "spotify" or parent["status"] != "failed":
+            return jsonify({"ok": False, "error": "Only failed Spotify jobs can resolve missing tracks."}), 409
+
+        missing = next(
+            (item for item in parent.get("missing_tracks", []) if item.get("spotify_url") == spotify_url),
+            None,
+        )
+        if missing is None:
+            return jsonify({"ok": False, "error": "That track is not listed as missing for this job."}), 404
+        if missing.get("resolved"):
+            return jsonify({"ok": False, "error": "That track has already been resolved."}), 409
+        if any(
+            item.get("resolution_of") == job_id
+            and item.get("spotify_track_url") == spotify_url
+            and item.get("status") in {"queued", "running"}
+            for item in jobs.values()
+        ):
+            return jsonify({"ok": False, "error": "A resolution attempt is already running for this track."}), 409
+
+        resolution_id = uuid.uuid4().hex[:10]
+        resolution = {
+            "id": resolution_id,
+            "url": spotify_url,
+            "playlist": False,
+            "album_mode": False,
+            "compilation": False,
+            "force": False,
+            "status": "queued",
+            "message": f"Resolving {missing.get('label') or 'missing Spotify track'}",
+            "progress": "",
+            "current_item": 0,
+            "total_items": 1,
+            "completed_items": 0,
+            "files": [],
+            "log": [f"Manual source: {source_url}"],
+            "created_at": time.time(),
+            "started_at": None,
+            "finished_at": None,
+            "returncode": None,
+            "http_403": False,
+            "retry_of": None,
+            "attempt": 1,
+            "source": "spotify",
+            "retry_base_completed": 0,
+            "failed_items": 0,
+            "missing_tracks": [],
+            "resolution_of": job_id,
+            "spotify_track_url": spotify_url,
+            "manual_source_url": source_url,
+            "download_query": f"{source_url}|{spotify_url}",
+        }
+        jobs[resolution_id] = resolution
+
+    try:
+        download_queue.put_nowait(resolution_id)
+    except queue.Full:
+        with jobs_lock:
+            jobs.pop(resolution_id, None)
+        return jsonify({"ok": False, "error": "Download queue is full."}), 429
+
+    return jsonify({"ok": True, "job_id": resolution_id}), 202
 
 
 @app.post("/api/probe")
