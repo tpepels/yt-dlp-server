@@ -271,15 +271,6 @@ def download():
     }
 
     with jobs_lock:
-        if download_queue.full():
-            return render_template(
-                "index.html",
-                jobs=public_jobs(),
-                import_root=str(IMPORT_ROOT),
-                versions=VERSIONS,
-                error="Download queue is full.",
-            ), 429
-
         jobs[job_id] = job
         if len(jobs) > MAX_HISTORY:
             removable = sorted(
@@ -289,7 +280,19 @@ def download():
             while len(jobs) > MAX_HISTORY and removable:
                 jobs.pop(removable.pop(0)["id"], None)
 
-    download_queue.put(job_id)
+    try:
+        download_queue.put_nowait(job_id)
+    except queue.Full:
+        with jobs_lock:
+            jobs.pop(job_id, None)
+        return render_template(
+            "index.html",
+            jobs=public_jobs(),
+            import_root=str(IMPORT_ROOT),
+            versions=VERSIONS,
+            error="Download queue is full.",
+        ), 429
+
     return redirect(url_for("index"))
 
 
