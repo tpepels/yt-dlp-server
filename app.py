@@ -113,6 +113,8 @@ def album_playlist_metadata_args(compilation=False):
         "",
         "--parse-metadata",
         "%(playlist_title,album,playlist|)s:%(album)s",
+        "--parse-metadata",
+        "%(playlist_index)s:%(track_number)s",
     ]
 
 
