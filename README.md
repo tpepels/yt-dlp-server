@@ -1,10 +1,13 @@
 # yt-dlp music server
 
-Small LAN web interface around [yt-dlp](https://github.com/yt-dlp/yt-dlp). Paste a media URL, queue an audio-only download, and write the result into a Plex-friendly music tree.
+Small LAN web interface around [yt-dlp](https://github.com/yt-dlp/yt-dlp). Paste a media URL, inspect whether it resolves to a single item or playlist, queue an audio-only download, and write the result into a Plex-friendly music tree.
 
 ## What it does
 
 - Web UI on port **4545**
+- Automatically probes pasted links before download
+- Shows whether yt-dlp sees a single item or playlist/album, including item count when available
+- Playlist/album downloading enabled by default
 - One download worker
 - Audio only
 - Keeps the best source audio format instead of transcoding everything to MP3
@@ -12,7 +15,6 @@ Small LAN web interface around [yt-dlp](https://github.com/yt-dlp/yt-dlp). Paste
 - Uses yt-dlp's music metadata fields first
 - Keeps all imports isolated under `YT-DLP Imports/`
 - Uses a persistent yt-dlp download archive to avoid accidental duplicates
-- Supports playlists/albums explicitly via a checkbox
 - Includes ffmpeg, Deno, yt-dlp EJS support and curl-cffi in the image
 - Optional `cookies.txt` support for sources that require login
 
@@ -45,7 +47,7 @@ Assuming this repository is cloned as `./yt-dlp-server` next to the compose file
       build:
         context: ./yt-dlp-server
       container_name: yt-dlp-server
-      user: "${UID}:${GID}"
+      user: "${UID:-1000}:${GID:-1000}"
       ports:
         - "4545:4545"
       environment:
@@ -64,7 +66,7 @@ Assuming this repository is cloned as `./yt-dlp-server` next to the compose file
 Prepare writable state directories once:
 
     sudo mkdir -p /srv/yt-dlp-server/state /srv/yt-dlp-server/tmp
-    sudo chown -R "$UID:$GID" /srv/yt-dlp-server
+    sudo chown -R "$(id -u):$(id -g)" /srv/yt-dlp-server
 
 Then:
 
@@ -73,11 +75,18 @@ Then:
 
 Open `http://YOUR-SERVER-IP:4545`.
 
-## Playlists
+## Playlist preflight
 
-Playlist downloading is off by default. This prevents a YouTube track URL containing a `list=` parameter from unexpectedly pulling the whole playlist.
+When a valid URL is pasted, the browser asks the server to inspect it before download.
 
-Tick **Download playlist / album** when you want the collection.
+The probe uses yt-dlp in simulation mode with a flat playlist and only the first playlist entry. It does not download media. The result is shown as either:
+
+- `Single item detected - ...`
+- `Playlist / album detected - ... - N items`
+
+Playlist/album mode is checked by default. If a URL points to a video that is also part of a playlist, yt-dlp is instructed to use the playlist. Uncheck the option if you only want that individual item.
+
+A failed probe is advisory: the actual download remains available because some extractors may fail lightweight inspection while still working normally.
 
 ## Duplicate handling
 
@@ -121,6 +130,7 @@ Watchtower does not rebuild locally built images, so it cannot update yt-dlp ins
 | `COOKIES_FILE` | empty | Optional Netscape-format cookies file |
 | `MAX_QUEUE` | `50` | Maximum waiting jobs |
 | `MAX_HISTORY` | `50` | In-memory UI history |
+| `PROBE_TIMEOUT` | `30` | Maximum link-inspection time in seconds |
 
 ## Security
 
