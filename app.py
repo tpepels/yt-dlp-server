@@ -647,6 +647,7 @@ def append_log(job_id, line):
                 if job["total_items"]:
                     job["completed_items"] = min(job["completed_items"], job["total_items"])
                 job["message"] = "Saved Spotify track"
+                persist_jobs_locked()
 
             job["log"].append(line)
             job["log"] = job["log"][-40:]
@@ -666,6 +667,7 @@ def append_log(job_id, line):
                 job["files"].append(filepath)
                 job["completed_items"] += 1
             job["message"] = f"Saved {Path(filepath).name}"
+            persist_jobs_locked()
             return
 
         playlist_match = _playlist_item_re.match(line)
@@ -686,6 +688,7 @@ def run_job(job_id):
         job["status"] = "running"
         job["started_at"] = time.time()
         job["message"] = "Starting spotDL" if job.get("source") == "spotify" else "Starting yt-dlp"
+        persist_jobs_locked()
 
     is_spotify = job.get("source") == "spotify"
     cmd = build_spotdl_command(job) if is_spotify else build_command(job)
@@ -765,6 +768,7 @@ def run_job(job_id):
                         job["message"] = "YouTube returned HTTP 403 - PO-token provider unavailable"
                 else:
                     job["message"] = f"yt-dlp exited with code {returncode}"
+            persist_jobs_locked()
     except Exception as exc:
         with jobs_lock:
             job = jobs[job_id]
@@ -772,6 +776,7 @@ def run_job(job_id):
             job["finished_at"] = time.time()
             job["message"] = str(exc)
             job["log"].append(f"ERROR: {exc}")
+            persist_jobs_locked()
 
 def worker():
     while True:
@@ -781,6 +786,19 @@ def worker():
         finally:
             download_queue.task_done()
 
+
+restored_queue_ids = load_persisted_jobs()
+for restored_id in restored_queue_ids:
+    try:
+        download_queue.put_nowait(restored_id)
+    except queue.Full:
+        with jobs_lock:
+            restored_job = jobs.get(restored_id)
+            if restored_job:
+                restored_job["status"] = "failed"
+                restored_job["message"] = "Could not restore queued job - queue capacity exceeded"
+                restored_job["finished_at"] = time.time()
+                persist_jobs_locked()
 
 threading.Thread(target=worker, name="yt-dlp-worker", daemon=True).start()
 
@@ -906,12 +924,14 @@ def download():
             )
             while len(jobs) > MAX_HISTORY and removable:
                 jobs.pop(removable.pop(0)["id"], None)
+        persist_jobs_locked()
 
     try:
         download_queue.put_nowait(job_id)
     except queue.Full:
         with jobs_lock:
             jobs.pop(job_id, None)
+            persist_jobs_locked()
         return render_template(
             "index.html",
             jobs=public_jobs(),
@@ -976,12 +996,14 @@ def retry_job(job_id):
             "download_query": None,
         }
         jobs[retry_id] = retry
+        persist_jobs_locked()
 
     try:
         download_queue.put_nowait(retry_id)
     except queue.Full:
         with jobs_lock:
             jobs.pop(retry_id, None)
+            persist_jobs_locked()
         return jsonify({"ok": False, "error": "Download queue is full."}), 429
 
     return jsonify({"ok": True, "job_id": retry_id}), 202
@@ -1057,12 +1079,14 @@ def resolve_missing_spotify_track(job_id):
             "download_query": f"{source_url}|{spotify_url}",
         }
         jobs[resolution_id] = resolution
+        persist_jobs_locked()
 
     try:
         download_queue.put_nowait(resolution_id)
     except queue.Full:
         with jobs_lock:
             jobs.pop(resolution_id, None)
+            persist_jobs_locked()
         return jsonify({"ok": False, "error": "Download queue is full."}), 429
 
     return jsonify({"ok": True, "job_id": resolution_id}), 202
@@ -1109,6 +1133,10 @@ def health():
             "queue": download_queue.qsize(),
             "import_root": str(IMPORT_ROOT),
             "versions": VERSIONS,
+            "jobs_state": {
+                "path": str(JOBS_STATE_FILE),
+                "persisted": JOBS_STATE_FILE.is_file(),
+            },
             "spotify": {
                 "enabled": VERSIONS.get("spotdl", "unavailable") != "unavailable",
                 "archive": str(SPOTDL_ARCHIVE_FILE),
