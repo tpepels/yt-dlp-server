@@ -57,6 +57,7 @@ jobs:
           grep -q 'Resolve track' templates/index.html
           grep -q 'Retry automatic search' templates/index.html
           grep -q 'Retry / continue' templates/index.html
+          grep -q 'Ignore permanently' templates/index.html
           grep -q '/api/jobs/' templates/index.html
       - name: Validate persistent queue state
         run: |
@@ -65,6 +66,13 @@ jobs:
             -e STATE_DIR=/tmp/state \
             -e TEMP_DIR=/tmp/work \
             yt-dlp-server:test python -c 'import json, tempfile, pathlib, app; now=123.0; raw=[{"id":"q1","url":"https://youtube.com/playlist?list=PL123","status":"queued","playlist":True,"message":"Waiting","created_at":1},{"id":"r1","url":"https://youtube.com/watch?v=abc","status":"running","playlist":False,"message":"Downloading","created_at":2},{"id":"sp2","url":"https://open.spotify.com/album/abc","status":"failed","source":"spotify","attempt":2,"completed_items":6,"total_items":7,"message":"Partial","created_at":3}]; p=pathlib.Path(tempfile.mkdtemp())/"jobs.json"; p.write_text(json.dumps(raw), encoding="utf-8"); app.JOBS_STATE_FILE=p; app.jobs.clear(); ids=app.load_persisted_jobs(); assert ids==["q1"], ids; assert app.jobs["q1"]["status"]=="queued"; assert app.jobs["r1"]["status"]=="failed"; assert "Interrupted by server restart" in app.jobs["r1"]["message"]; assert app.jobs["sp2"]["retry_base_completed"]==6; saved=json.loads(p.read_text()); assert saved["version"]==1 and len(saved["jobs"])==3; app.jobs["q1"]["status"]="succeeded"; app.persist_jobs(); saved2=json.loads(p.read_text()); assert any(j["id"]=="q1" and j["status"]=="succeeded" for j in saved2["jobs"])'
+      - name: Validate unavailable YouTube track ignore
+        run: |
+          docker run --rm --user 1000:1000 \
+            -e MUSIC_ROOT=/tmp/music \
+            -e STATE_DIR=/tmp/state \
+            -e TEMP_DIR=/tmp/work \
+            yt-dlp-server:test python -c 'import json, pathlib, tempfile, time, app; d=pathlib.Path(tempfile.mkdtemp()); app.IGNORED_TRACKS_FILE=d/"ignored-tracks.json"; app.JOBS_STATE_FILE=d/"jobs.json"; app.jobs.clear(); log=["WARNING: [youtube:tab] YouTube said: INFO - 1 unavailable video is hidden","ERROR: [youtube] riu2Bx6miIU: Video unavailable"]; missing=app.extract_youtube_missing_tracks(log, {}); assert missing==[{"source":"youtube","source_id":"riu2Bx6miIU","label":"YouTube video riu2Bx6miIU","reason":"Video unavailable","ignored":False}], missing; app.jobs["j"]={"id":"j","url":"https://music.youtube.com/playlist?list=PLCB8D47FCA386F615","source":"yt-dlp","status":"failed","playlist":True,"album_mode":False,"compilation":False,"force":False,"message":"yt-dlp exited with code 1","progress":"","current_item":14,"total_items":14,"completed_items":13,"files":[],"log":log,"created_at":time.time(),"started_at":None,"finished_at":time.time(),"returncode":1,"http_403":False,"retry_of":None,"attempt":3,"retry_base_completed":0,"failed_items":1,"missing_tracks":missing,"resolution_of":None,"spotify_track_url":None,"manual_source_url":None,"download_query":None}; client=app.app.test_client(); r=client.post("/api/jobs/j/ignore", json={"source_id":"riu2Bx6miIU"}); assert r.status_code==200, r.data; j=app.jobs["j"]; assert j["status"]=="succeeded"; assert "13/14 tracks saved; 1 ignored" in j["message"], j["message"]; state=json.loads(app.IGNORED_TRACKS_FILE.read_text()); assert "youtube:riu2Bx6miIU" in state; restored=app.normalize_persisted_job({"id":"old","url":"https://music.youtube.com/playlist?list=PLCB8D47FCA386F615","status":"failed","source":"yt-dlp","playlist":True,"completed_items":13,"total_items":14,"log":log}); assert restored["missing_tracks"][0]["ignored"] is True; assert restored["status"]=="succeeded"'
       - name: Validate failed-job retry continuation
         run: |
           docker run --rm --user 1000:1000 \
