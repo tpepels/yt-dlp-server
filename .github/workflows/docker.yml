@@ -58,6 +58,13 @@ jobs:
           grep -q 'Retry automatic search' templates/index.html
           grep -q 'Retry / continue' templates/index.html
           grep -q '/api/jobs/' templates/index.html
+      - name: Validate persistent queue state
+        run: |
+          docker run --rm --user 1000:1000 \
+            -e MUSIC_ROOT=/tmp/music \
+            -e STATE_DIR=/tmp/state \
+            -e TEMP_DIR=/tmp/work \
+            yt-dlp-server:test python -c 'import json, tempfile, pathlib, app; now=123.0; raw=[{"id":"q1","url":"https://youtube.com/playlist?list=PL123","status":"queued","playlist":True,"message":"Waiting","created_at":1},{"id":"r1","url":"https://youtube.com/watch?v=abc","status":"running","playlist":False,"message":"Downloading","created_at":2}]; p=pathlib.Path(tempfile.mkdtemp())/"jobs.json"; p.write_text(json.dumps(raw), encoding="utf-8"); app.JOBS_STATE_FILE=p; app.jobs.clear(); ids=app.load_persisted_jobs(); assert ids==["q1"], ids; assert app.jobs["q1"]["status"]=="queued"; assert app.jobs["r1"]["status"]=="failed"; assert "Interrupted by server restart" in app.jobs["r1"]["message"]; saved=json.loads(p.read_text()); assert saved["version"]==1 and len(saved["jobs"])==2; app.jobs["q1"]["status"]="succeeded"; app.persist_jobs(); saved2=json.loads(p.read_text()); assert any(j["id"]=="q1" and j["status"]=="succeeded" for j in saved2["jobs"])'
       - name: Validate failed-job retry continuation
         run: |
           docker run --rm --user 1000:1000 \
