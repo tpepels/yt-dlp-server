@@ -152,6 +152,32 @@ The `/health` endpoint reports whether the provider directory is available and w
 
 A PO token improves compatibility with current YouTube enforcement but cannot guarantee that every YouTube media request will succeed. If YouTube still returns a 403, the job now reports that it failed despite PO-token support instead of showing only a generic yt-dlp exit code.
 
+## Persistent queue and restart recovery
+
+Job history and queued work are persisted to:
+
+    /data/state/jobs.json
+
+The state file is updated atomically when jobs are created, retried, manually resolved, started, completed, fail, or save another track. Because `/data/state` is a persistent volume, queued jobs and the visible job history survive container rebuilds/restarts.
+
+Restart behavior is deliberately conservative:
+
+- jobs that were **queued** are automatically requeued after restart;
+- jobs that were **running** are restored as failed with `Interrupted by server restart - use Retry / continue`;
+- completed and failed job history remains visible;
+- an interrupted job is not silently restarted, which avoids accidentally repeating a forced/overwrite download.
+
+### Migrating the current in-memory queue
+
+Versions before persistent queue support only keep jobs in memory. Before the first upgrade to a version with queue persistence, save the current `/api/jobs` response directly into the persistent state directory:
+
+    curl -fsS http://127.0.0.1:4545/api/jobs \
+      -o /srv/yt-dlp-server/state/jobs.json
+
+The new server accepts this older JSON-array format on first startup, normalizes it into the persistent state format, restores queued jobs, and preserves the rest of the visible history.
+
+After this migration, no manual queue export is required for future updates.
+
 ## Duplicate handling
 
 Normal yt-dlp downloads use `/data/state/archive.txt`. Spotify/spotDL downloads use `/data/state/spotdl-archive.txt`. Each archive records successfully completed source items so retries and repeated submissions can skip tracks that are already complete.
@@ -189,7 +215,7 @@ Watchtower does not rebuild locally built images, so it cannot update yt-dlp ins
 | `PORT` | `4545` | HTTP port inside the container |
 | `MUSIC_ROOT` | `/data/music` | Mounted Plex music root |
 | `IMPORT_SUBDIR` | `YT-DLP Imports` | Isolated directory inside the music root |
-| `STATE_DIR` | `/data/state` | Persistent archive/state |
+| `STATE_DIR` | `/data/state` | Persistent archives, queue and job history |
 | `TEMP_DIR` | `/data/tmp` | Temporary files |
 | `COOKIES_FILE` | empty | Optional Netscape-format cookies file |
 | `MAX_QUEUE` | `50` | Maximum waiting jobs |
