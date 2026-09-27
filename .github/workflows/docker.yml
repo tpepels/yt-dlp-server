@@ -19,6 +19,8 @@ jobs:
           docker run --rm yt-dlp-server:test yt-dlp --version
           docker run --rm yt-dlp-server:test deno --version
           docker run --rm yt-dlp-server:test ffmpeg -version
+          docker run --rm yt-dlp-server:test python -c "import importlib.metadata; assert importlib.metadata.version('bgutil-ytdlp-pot-provider') == '2.0.0'"
+          docker run --rm --user 1000:1000 yt-dlp-server:test sh -c 'test -f /opt/bgutil-ytdlp-pot-provider/server/src/generate_once.ts && deno run --allow-env --allow-net --allow-ffi=/opt/bgutil-ytdlp-pot-provider/server/node_modules --allow-write=/tmp/yt-dlp-cache/bgutil-ytdlp-pot-provider --allow-read=/tmp/yt-dlp-cache/bgutil-ytdlp-pot-provider,/opt/bgutil-ytdlp-pot-provider/server/node_modules /opt/bgutil-ytdlp-pot-provider/server/src/generate_once.ts --version | grep -qx 2.0.0'
       - name: Validate non-root runtime, naming and playlist classification
         run: |
           docker run --rm --user 1000:1000 \
@@ -43,3 +45,11 @@ jobs:
           grep -q 'Supported sources' templates/index.html
           grep -q 'minmax(0,1fr)' templates/index.html
           grep -q 'overflow-x:hidden' templates/index.html
+          grep -q 'PO bgutil' templates/index.html
+      - name: Validate YouTube PO-token command wiring
+        run: |
+          docker run --rm --user 1000:1000 \
+            -e MUSIC_ROOT=/tmp/music \
+            -e STATE_DIR=/tmp/state \
+            -e TEMP_DIR=/tmp/work \
+            yt-dlp-server:test python -c 'import app; u="https://youtube.com/watch?v=df6l0NnHOTw"; args=app.youtube_extractor_args(u); assert "youtube:player_client=mweb" in args; assert any(x.startswith("youtubepot-bgutilscript:server_home=") for x in args); assert app.VERSIONS["bgutil"]=="2.0.0"; assert app.BGUTIL_SERVER_HOME.is_dir()'
