@@ -76,6 +76,7 @@
     <div class="sources">
       <div class="sources-title">Supported sources</div>
       <div class="source-chips" aria-label="Example supported sites">
+        <span class="source-chip">Spotify via spotDL</span>
         <span class="source-chip">YouTube / YouTube Music</span>
         <span class="source-chip">SoundCloud</span>
         <span class="source-chip">Bandcamp</span>
@@ -90,14 +91,14 @@
       <div class="sources-note">
         Audio only is always downloaded. yt-dlp supports many more sites;
         <a href="https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md" target="_blank" rel="noopener noreferrer">see the full current list</a>.
-        Some sites may require cookies or may stop working temporarily when the site changes.
+        Spotify links use Spotify metadata while spotDL matches the audio from YouTube Music / YouTube. Some sites may require cookies or may stop working temporarily when the site changes.
       </div>
     </div>
   </section>
   <section class="panel">
     <div class="section-head">
       <h2>Downloads</h2>
-      <div class="versions">yt-dlp {{ versions.yt_dlp }} · {{ versions.deno.splitlines()[0] }} · PO bgutil {{ versions.bgutil }}</div>
+      <div class="versions">spotDL {{ versions.spotdl }} · yt-dlp {{ versions.yt_dlp }} · {{ versions.deno.splitlines()[0] }} · PO bgutil {{ versions.bgutil }}</div>
     </div>
     <div id="jobs" class="jobs">{% if not jobs %}<div class="empty">No downloads yet.</div>{% endif %}</div>
   </section>
@@ -107,6 +108,7 @@
   const form = document.getElementById("download-form");
   const urlInput = document.getElementById("url-input");
   const downloadButton = document.getElementById("download-button");
+  const playlistInput = document.getElementById("playlist-input");
   const probeResult = document.getElementById("probe-result");
 
   let probeTimer = null;
@@ -150,7 +152,8 @@
       meta.className = "job-meta";
       const bits = [job.message];
       if (job.progress) bits.push(job.progress);
-      if (job.playlist) bits.push("playlist");
+      if (job.source === "spotify") bits.push("Spotify / spotDL");
+      else if (job.playlist) bits.push("playlist");
       if (job.attempt > 1) bits.push("attempt " + job.attempt);
       meta.textContent = bits.filter(Boolean).join(" · ");
       card.appendChild(meta);
@@ -288,7 +291,11 @@
           return true;
         }
 
-        if (data.kind === "playlist") {
+        if (data.kind === "spotify") {
+          playlistInput.disabled = true;
+          probeResult.textContent = data.title + " detected · spotDL will use Spotify metadata and match audio from YouTube Music / YouTube";
+          probeResult.className = "probe good";
+        } else if (data.kind === "playlist") {
           const count = data.count ? " · " + data.count + " items" : "";
           const albumArtist = data.album_artist ? " · album artist: " + data.album_artist : "";
           probeResult.textContent = "Playlist / album detected · " + data.title + count + albumArtist;
@@ -321,6 +328,7 @@
 
   urlInput.addEventListener("input", () => {
     probedUrl = "";
+    playlistInput.disabled = false;
     clearTimeout(probeTimer);
     probeResult.textContent = "";
     probeResult.className = "probe";
