@@ -57,6 +57,7 @@
     .resolver-row input { width:100%; min-width:0; border:1px solid var(--line); border-radius:8px; background:#0e1012; color:var(--text); padding:9px 10px; font:12px/1.3 inherit; }
     .resolver-row button { min-height:36px; padding:7px 11px; font-size:12px; }
     .resolver-error { margin-top:6px; color:var(--bad); font-size:11px; overflow-wrap:anywhere; }
+    .ignore-button { min-height:34px; margin-top:8px; padding:7px 11px; background:#d9c7a5; font-size:12px; }
     details { min-width:0; max-width:100%; margin-top:9px; color:var(--muted); } summary { cursor:pointer; }
     pre { width:100%; min-width:0; max-width:100%; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; margin:8px 0 0; padding:10px; background:#0e1012; border-radius:8px; color:#b7bec4; font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; max-height:260px; overflow:auto; }
     .empty { color:var(--muted); padding:8px 0; }
@@ -198,6 +199,64 @@
 
         progress.append(head, bar);
         card.appendChild(progress);
+      }
+
+      if (job.status === "failed" && job.source === "yt-dlp" && job.missing_tracks && job.missing_tracks.length) {
+        const missingWrap = document.createElement("div");
+        missingWrap.className = "missing-tracks";
+
+        for (const missing of job.missing_tracks) {
+          if (missing.source !== "youtube" || missing.ignored) continue;
+
+          const item = document.createElement("div");
+          item.className = "missing-track";
+
+          const title = document.createElement("div");
+          title.className = "missing-track-title";
+          title.textContent = "Missing: " + (missing.label || ("YouTube video " + missing.source_id));
+
+          const reason = document.createElement("div");
+          reason.className = "missing-track-url";
+          reason.textContent = missing.reason || "Video unavailable";
+
+          const ignore = document.createElement("button");
+          ignore.type = "button";
+          ignore.className = "ignore-button";
+          ignore.textContent = "Ignore permanently";
+
+          const error = document.createElement("div");
+          error.className = "resolver-error";
+
+          ignore.addEventListener("click", async () => {
+            ignore.disabled = true;
+            ignore.textContent = "Ignoring…";
+            error.textContent = "";
+            try {
+              const response = await fetch("/api/jobs/" + encodeURIComponent(job.id) + "/ignore", {
+                method: "POST",
+                headers: {"Content-Type": "application/json", "Accept": "application/json"},
+                body: JSON.stringify({source_id: missing.source_id}),
+              });
+              const data = await response.json();
+              if (!response.ok || !data.ok) {
+                error.textContent = data.error || "Could not ignore track.";
+                ignore.disabled = false;
+                ignore.textContent = "Ignore permanently";
+                return;
+              }
+              await refreshJobs();
+            } catch (_) {
+              error.textContent = "Could not ignore track.";
+              ignore.disabled = false;
+              ignore.textContent = "Ignore permanently";
+            }
+          });
+
+          item.append(title, reason, ignore, error);
+          missingWrap.appendChild(item);
+        }
+
+        if (missingWrap.childElementCount) card.appendChild(missingWrap);
       }
 
       if (job.status === "failed" && !retriedParents.has(job.id) && job.source === "spotify" && job.missing_tracks && job.missing_tracks.length) {
