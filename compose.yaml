@@ -2,11 +2,11 @@ services:
   yt-dlp-server:
     build: .
     container_name: yt-dlp-server
-    user: "\${UID:-1000}:\${GID:-1000}"
+    user: "${UID:-1000}:${GID:-1000}"
     ports:
       - "4545:4545"
     environment:
-      TZ: \${TZ:-Europe/Lisbon}
+      TZ: ${TZ:-Europe/Lisbon}
       PORT: 4545
       MUSIC_ROOT: /data/music
       IMPORT_SUBDIR: YT-DLP Imports
