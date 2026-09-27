@@ -1,0 +1,21 @@
+name: Docker CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose
+        run: docker compose config
+      - name: Build image
+        run: docker build -t yt-dlp-server:test .
+      - name: Smoke-test installed tools
+        run: |
+          docker run --rm yt-dlp-server:test python -m py_compile /app/app.py
+          docker run --rm yt-dlp-server:test yt-dlp --version
+          docker run --rm yt-dlp-server:test deno --version
+          docker run --rm yt-dlp-server:test ffmpeg -version
