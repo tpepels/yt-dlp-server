@@ -17,7 +17,7 @@ Small LAN web interface around [yt-dlp](https://github.com/yt-dlp/yt-dlp). Paste
 - Uses yt-dlp's music metadata fields first
 - Keeps all imports isolated under `YT-DLP Imports/`
 - Uses a persistent yt-dlp download archive to avoid accidental duplicates
-- Includes ffmpeg, Deno, yt-dlp EJS support and curl-cffi in the image
+- Includes ffmpeg, Deno, yt-dlp EJS support, curl-cffi, and the BgUtils PO-token provider in the image
 - Optional `cookies.txt` support for sources that require login
 
 ## Library layout
@@ -92,6 +92,30 @@ For YouTube's auto-generated album playlists (`OLAK5uy_...`), the preflight insp
 
 A failed probe is advisory: the actual download remains available because some extractors may fail lightweight inspection while still working normally.
 
+
+## YouTube PO tokens and HTTP 403
+
+YouTube increasingly requires Proof-of-Origin (PO) tokens for some media requests. Without the required token, a video or track can resolve normally and still fail when yt-dlp fetches the actual media with `HTTP Error 403: Forbidden`.
+
+This image bundles `bgutil-ytdlp-pot-provider` **2.0.0** plus its matching BgUtils server scripts. For YouTube URLs only, the app:
+
+- uses the yt-dlp `mweb` player client;
+- asks the BgUtils script provider to generate per-video PO tokens automatically;
+- runs that provider locally with the already-bundled Deno runtime;
+- stores temporary token/cache data under the writable `XDG_CACHE_HOME`;
+- leaves non-YouTube extractors unchanged.
+
+The app uses script mode rather than exposing the BgUtils HTTP service. This server has one download worker, so the script-mode concurrency tradeoff is acceptable and there is no additional LAN-facing token-provider port.
+
+The provider path and player client can be overridden if needed:
+
+    BGUTIL_SERVER_HOME=/opt/bgutil-ytdlp-pot-provider/server
+    YOUTUBE_PLAYER_CLIENT=mweb
+
+The `/health` endpoint reports whether the provider directory is available and which YouTube client is configured.
+
+A PO token improves compatibility with current YouTube enforcement but cannot guarantee that every YouTube media request will succeed. If YouTube still returns a 403, the job now reports that it failed despite PO-token support instead of showing only a generic yt-dlp exit code.
+
 ## Duplicate handling
 
 Normal downloads use `/data/state/archive.txt`. yt-dlp records successfully downloaded source IDs there. Submitting the same source again will normally do nothing.
@@ -135,6 +159,8 @@ Watchtower does not rebuild locally built images, so it cannot update yt-dlp ins
 | `MAX_QUEUE` | `50` | Maximum waiting jobs |
 | `MAX_HISTORY` | `50` | In-memory UI history |
 | `PROBE_TIMEOUT` | `30` | Maximum link-inspection time in seconds |
+| `BGUTIL_SERVER_HOME` | `/opt/bgutil-ytdlp-pot-provider/server` | Bundled BgUtils provider scripts |
+| `YOUTUBE_PLAYER_CLIENT` | `mweb` | YouTube client used with automatic PO tokens |
 
 ## Security
 

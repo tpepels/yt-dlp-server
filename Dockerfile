@@ -1,19 +1,30 @@
 FROM denoland/deno:bin AS deno_bin
 FROM python:3.13-slim
 
+ARG BGUTIL_VERSION=2.0.0
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HOME=/tmp/yt-dlp-home \
     XDG_CACHE_HOME=/tmp/yt-dlp-cache \
     DENO_DIR=/tmp/deno \
     DENO_NO_UPDATE_CHECK=1 \
-    DENO_NO_PROMPT=1
+    DENO_NO_PROMPT=1 \
+    BGUTIL_SERVER_HOME=/opt/bgutil-ytdlp-pot-provider/server \
+    YOUTUBE_PLAYER_CLIENT=mweb
 
 COPY --from=deno_bin /deno /usr/local/bin/deno
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --branch "${BGUTIL_VERSION}" \
+      https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
+      /opt/bgutil-ytdlp-pot-provider \
+    && cd /opt/bgutil-ytdlp-pot-provider/server \
+    && DENO_DIR=/opt/bgutil-deno-cache deno install --allow-scripts=npm:canvas --frozen \
+    && chmod -R a+rX /opt/bgutil-ytdlp-pot-provider /opt/bgutil-deno-cache
 
 WORKDIR /app
 
