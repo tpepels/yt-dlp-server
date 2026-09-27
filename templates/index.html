@@ -200,7 +200,7 @@
         card.appendChild(progress);
       }
 
-      if (job.status === "failed" && job.source === "spotify" && job.missing_tracks && job.missing_tracks.length) {
+      if (job.status === "failed" && !retriedParents.has(job.id) && job.source === "spotify" && job.missing_tracks && job.missing_tracks.length) {
         const missingWrap = document.createElement("div");
         missingWrap.className = "missing-tracks";
 
