@@ -127,6 +127,14 @@ def normalize_persisted_job(raw):
     job_id = str(raw.get("id") or uuid.uuid4().hex[:10])
     status = raw.get("status") if raw.get("status") in {"queued", "running", "succeeded", "failed"} else "failed"
     source = raw.get("source") or ("spotify" if is_spotify_url(raw["url"]) else "yt-dlp")
+    retry_base_completed = raw.get("retry_base_completed")
+    if retry_base_completed is None:
+        retry_base_completed = (
+            int(raw.get("completed_items") or 0)
+            if source == "spotify" and int(raw.get("attempt") or 1) > 1
+            else 0
+        )
+
     job = {
         "id": job_id,
         "url": str(raw["url"]),
@@ -150,7 +158,7 @@ def normalize_persisted_job(raw):
         "retry_of": raw.get("retry_of"),
         "attempt": int(raw.get("attempt") or 1),
         "source": source,
-        "retry_base_completed": int(raw.get("retry_base_completed") or 0),
+        "retry_base_completed": int(retry_base_completed),
         "failed_items": int(raw.get("failed_items") or 0),
         "missing_tracks": list(raw.get("missing_tracks") or []),
         "resolution_of": raw.get("resolution_of"),
@@ -203,8 +211,14 @@ def load_persisted_jobs():
             restored.append(job)
 
     restored.sort(key=lambda item: item["created_at"])
+    # Do not drop queued work on restore. Runtime history pruning only removes
+    # terminal jobs, so the persisted loader must preserve the same guarantee.
     if len(restored) > MAX_HISTORY:
-        restored = restored[-MAX_HISTORY:]
+        queued = [item for item in restored if item["status"] == "queued"]
+        terminal = [item for item in restored if item["status"] != "queued"]
+        keep_terminal = max(0, MAX_HISTORY - len(queued))
+        restored = terminal[-keep_terminal:] + queued if keep_terminal else queued
+        restored.sort(key=lambda item: item["created_at"])
 
     with jobs_lock:
         jobs.clear()
