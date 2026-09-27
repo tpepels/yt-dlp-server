@@ -7,11 +7,12 @@
   <style>
     :root { color-scheme: dark; --bg:#111315; --panel:#191c1f; --panel2:#22262a; --text:#f4f5f5; --muted:#9ca4aa; --line:#30363b; --good:#6fdc8c; --bad:#ff7b72; --wait:#d4b45f; }
     * { box-sizing:border-box; }
+    html, body { max-width:100%; overflow-x:hidden; }
     body { margin:0; font:15px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }
-    main { width:min(920px,calc(100% - 32px)); margin:48px auto; }
+    main { width:min(920px,calc(100% - 32px)); max-width:100%; margin:48px auto; }
     h1 { margin:0 0 6px; font-size:30px; letter-spacing:-.03em; }
     .sub { color:var(--muted); margin:0 0 28px; }
-    .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; margin-bottom:18px; }
+    .panel { min-width:0; max-width:100%; background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; margin-bottom:18px; }
     form { display:grid; gap:14px; }
     .url-row { display:grid; grid-template-columns:1fr auto; gap:10px; }
     input[type=url] { width:100%; min-width:0; border:1px solid var(--line); border-radius:10px; background:#0e1012; color:var(--text); padding:13px 14px; font:inherit; outline:none; }
@@ -24,25 +25,32 @@
     .probe.good { color:var(--good); }
     .probe.warn { color:var(--wait); }
     .path { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; word-break:break-all; }
+    .sources { margin-top:14px; display:grid; gap:8px; }
+    .sources-title { color:var(--text); font-size:13px; font-weight:650; }
+    .source-chips { display:flex; flex-wrap:wrap; gap:7px; min-width:0; }
+    .source-chip { max-width:100%; border:1px solid var(--line); border-radius:999px; padding:4px 9px; background:#141719; color:#c8cdd1; font-size:12px; white-space:nowrap; }
+    .sources-note { color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+    .sources-note a { color:#b8c7e6; }
     .error { background:#361b1d; color:#ffd2cf; border:1px solid #713238; border-radius:10px; padding:11px 13px; margin-bottom:14px; }
     .section-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
     h2 { font-size:17px; margin:0 0 13px; }
     .versions { color:var(--muted); font-size:12px; }
     .jobs { display:grid; gap:10px; }
-    .job { background:var(--panel2); border:1px solid var(--line); border-radius:11px; padding:13px 14px; }
-    .job-top { display:flex; justify-content:space-between; gap:14px; align-items:flex-start; }
-    .job-url { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#d9dde0; }
+    .job { min-width:0; max-width:100%; overflow:hidden; background:var(--panel2); border:1px solid var(--line); border-radius:11px; padding:13px 14px; }
+    .job-top { min-width:0; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; align-items:start; }
+    .job-url { min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#d9dde0; }
     .status { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
     .status.succeeded { color:var(--good); } .status.failed { color:var(--bad); } .status.queued { color:var(--wait); } .status.running { color:#8ab4f8; }
-    .job-meta { color:var(--muted); margin-top:7px; font-size:13px; }
-    .track-progress { margin-top:10px; }
-    .track-progress-head { display:flex; justify-content:space-between; gap:12px; margin-bottom:5px; color:var(--muted); font-size:12px; }
-    .track-progress-bar { height:6px; overflow:hidden; border-radius:999px; background:#0e1012; }
+    .job-meta { min-width:0; max-width:100%; color:var(--muted); margin-top:7px; font-size:13px; overflow-wrap:anywhere; }
+    .track-progress { min-width:0; max-width:100%; margin-top:10px; }
+    .track-progress-head { min-width:0; display:flex; flex-wrap:wrap; justify-content:space-between; gap:4px 12px; margin-bottom:5px; color:var(--muted); font-size:12px; }
+    .track-progress-head span { min-width:0; overflow-wrap:anywhere; }
+    .track-progress-bar { width:100%; max-width:100%; height:6px; overflow:hidden; border-radius:999px; background:#0e1012; }
     .track-progress-fill { height:100%; width:0; background:#8ab4f8; transition:width .2s ease; }
-    details { margin-top:9px; color:var(--muted); } summary { cursor:pointer; }
-    pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:8px 0 0; padding:10px; background:#0e1012; border-radius:8px; color:#b7bec4; font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; max-height:260px; overflow:auto; }
+    details { min-width:0; max-width:100%; margin-top:9px; color:var(--muted); } summary { cursor:pointer; }
+    pre { width:100%; min-width:0; max-width:100%; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; margin:8px 0 0; padding:10px; background:#0e1012; border-radius:8px; color:#b7bec4; font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; max-height:260px; overflow:auto; }
     .empty { color:var(--muted); padding:8px 0; }
-    @media (max-width:620px) { main{margin-top:24px}.url-row{grid-template-columns:1fr}button{min-height:44px}.section-head{display:block}.versions{margin-bottom:10px} }
+    @media (max-width:620px) { main{width:calc(100% - 20px);margin-top:16px}.panel{padding:14px}.url-row{grid-template-columns:minmax(0,1fr)}button{min-height:44px}.section-head{display:block}.versions{margin-bottom:10px}.track-progress-head{display:grid;grid-template-columns:1fr}.source-chip{white-space:normal} }
   </style>
 </head>
 <body>
@@ -63,6 +71,26 @@
       </div>
     </form>
     <div class="path">Library target: {{ import_root }}/Artist/Album/Track</div>
+    <div class="sources">
+      <div class="sources-title">Supported sources</div>
+      <div class="source-chips" aria-label="Example supported sites">
+        <span class="source-chip">YouTube / YouTube Music</span>
+        <span class="source-chip">SoundCloud</span>
+        <span class="source-chip">Bandcamp</span>
+        <span class="source-chip">Mixcloud</span>
+        <span class="source-chip">Audiomack</span>
+        <span class="source-chip">Audius</span>
+        <span class="source-chip">Beatport</span>
+        <span class="source-chip">Apple Podcasts</span>
+        <span class="source-chip">Internet Archive</span>
+        <span class="source-chip">Vimeo</span>
+      </div>
+      <div class="sources-note">
+        Audio only is always downloaded. yt-dlp supports many more sites;
+        <a href="https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md" target="_blank" rel="noopener noreferrer">see the full current list</a>.
+        Some sites may require cookies or may stop working temporarily when the site changes.
+      </div>
+    </div>
   </section>
   <section class="panel">
     <div class="section-head">

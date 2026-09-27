@@ -40,3 +40,6 @@ jobs:
           grep -q '"/api/probe"' app.py
           grep -q 'openLogs' templates/index.html
           grep -q 'tracks saved' templates/index.html
+          grep -q 'Supported sources' templates/index.html
+          grep -q 'minmax(0,1fr)' templates/index.html
+          grep -q 'overflow-x:hidden' templates/index.html
