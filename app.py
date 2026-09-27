@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
@@ -201,8 +201,14 @@ def append_log(job_id, line):
         if line.startswith("__YTDLP_FILE__="):
             filepath = line.split("=", 1)[1]
             job["files"].append(filepath)
+            job["completed_items"] += 1
             job["message"] = f"Saved {Path(filepath).name}"
             return
+
+        playlist_match = _playlist_item_re.match(line)
+        if playlist_match:
+            job["current_item"] = int(playlist_match.group(1))
+            job["total_items"] = int(playlist_match.group(2))
 
         match = _progress_re.match(line)
         if match:
@@ -282,7 +288,11 @@ def public_jobs():
                 "message": job["message"],
                 "progress": job["progress"],
                 "playlist": job["playlist"],
+                "album_mode": job["album_mode"],
                 "force": job["force"],
+                "current_item": job["current_item"],
+                "total_items": job["total_items"],
+                "completed_items": job["completed_items"],
                 "files": list(job["files"]),
                 "log": list(job["log"]),
                 "created_at": job["created_at"],
@@ -321,10 +331,14 @@ def download():
         "id": job_id,
         "url": url,
         "playlist": request.form.get("playlist") == "on",
+        "album_mode": request.form.get("playlist") == "on" and is_youtube_album_playlist(url),
         "force": request.form.get("force") == "on",
         "status": "queued",
         "message": "Waiting for worker",
         "progress": "",
+        "current_item": 0,
+        "total_items": 0,
+        "completed_items": 0,
         "files": [],
         "log": [],
         "created_at": time.time(),
