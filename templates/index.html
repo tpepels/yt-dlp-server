@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>yt-dlp music server</title>
+  <style>
+    :root { color-scheme: dark; --bg:#111315; --panel:#191c1f; --panel2:#22262a; --text:#f4f5f5; --muted:#9ca4aa; --line:#30363b; --good:#6fdc8c; --bad:#ff7b72; --wait:#d4b45f; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:15px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }
+    main { width:min(920px,calc(100% - 32px)); margin:48px auto; }
+    h1 { margin:0 0 6px; font-size:30px; letter-spacing:-.03em; }
+    .sub { color:var(--muted); margin:0 0 28px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; margin-bottom:18px; }
+    form { display:grid; gap:14px; }
+    .url-row { display:grid; grid-template-columns:1fr auto; gap:10px; }
+    input[type=url] { width:100%; min-width:0; border:1px solid var(--line); border-radius:10px; background:#0e1012; color:var(--text); padding:13px 14px; font:inherit; outline:none; }
+    input[type=url]:focus { border-color:#6b737b; }
+    button { border:0; border-radius:10px; padding:0 18px; background:#e9ecef; color:#111315; font:650 14px system-ui,sans-serif; cursor:pointer; }
+    .checks { display:flex; flex-wrap:wrap; gap:18px; color:var(--muted); }
+    label { display:flex; gap:8px; align-items:center; }
+    .path { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; word-break:break-all; }
+    .error { background:#361b1d; color:#ffd2cf; border:1px solid #713238; border-radius:10px; padding:11px 13px; margin-bottom:14px; }
+    .section-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+    h2 { font-size:17px; margin:0 0 13px; }
+    .versions { color:var(--muted); font-size:12px; }
+    .jobs { display:grid; gap:10px; }
+    .job { background:var(--panel2); border:1px solid var(--line); border-radius:11px; padding:13px 14px; }
+    .job-top { display:flex; justify-content:space-between; gap:14px; align-items:flex-start; }
+    .job-url { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#d9dde0; }
+    .status { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
+    .status.succeeded { color:var(--good); } .status.failed { color:var(--bad); } .status.queued { color:var(--wait); } .status.running { color:#8ab4f8; }
+    .job-meta { color:var(--muted); margin-top:7px; font-size:13px; }
+    details { margin-top:9px; color:var(--muted); } summary { cursor:pointer; }
+    pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:8px 0 0; padding:10px; background:#0e1012; border-radius:8px; color:#b7bec4; font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; max-height:260px; overflow:auto; }
+    .empty { color:var(--muted); padding:8px 0; }
+    @media (max-width:620px) { main{margin-top:24px}.url-row{grid-template-columns:1fr}button{min-height:44px}.section-head{display:block}.versions{margin-bottom:10px} }
+  </style>
+</head>
+<body>
+<main>
+  <h1>yt-dlp music server</h1>
+  <p class="sub">Audio only. Metadata and cover art embedded when the source provides them.</p>
+  <section class="panel">
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <form action="/download" method="post">
+      <div class="url-row">
+        <input type="url" name="url" placeholder="https://music.youtube.com/watch?v=..." required autofocus>
+        <button type="submit">Download</button>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" name="playlist"> Download playlist / album</label>
+        <label><input type="checkbox" name="force"> Ignore archive and overwrite existing file</label>
+      </div>
+    </form>
+    <div class="path">Library target: {{ import_root }}/Artist/Album/Track</div>
+  </section>
+  <section class="panel">
+    <div class="section-head">
+      <h2>Downloads</h2>
+      <div class="versions">yt-dlp {{ versions.yt_dlp }} · {{ versions.deno.splitlines()[0] }}</div>
+    </div>
+    <div id="jobs" class="jobs">{% if not jobs %}<div class="empty">No downloads yet.</div>{% endif %}</div>
+  </section>
+</main>
+<script>
+  const initialJobs = {{ jobs | tojson }};
+  function renderJobs(jobs) {
+    const root = document.getElementById("jobs");
+    root.replaceChildren();
+    if (!jobs.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "No downloads yet.";
+      root.appendChild(empty);
+      return;
+    }
+    for (const job of jobs) {
+      const card = document.createElement("article");
+      card.className = "job";
+      const top = document.createElement("div");
+      top.className = "job-top";
+      const url = document.createElement("div");
+      url.className = "job-url";
+      url.title = job.url;
+      url.textContent = job.url;
+      const status = document.createElement("div");
+      status.className = "status " + job.status;
+      status.textContent = job.status;
+      top.append(url, status);
+      card.appendChild(top);
+      const meta = document.createElement("div");
+      meta.className = "job-meta";
+      const bits = [job.message];
+      if (job.progress) bits.push(job.progress);
+      if (job.playlist) bits.push("playlist");
+      meta.textContent = bits.filter(Boolean).join(" · ");
+      card.appendChild(meta);
+      if ((job.files && job.files.length) || (job.log && job.log.length)) {
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = job.files && job.files.length ? "Files and log" : "Log";
+        details.appendChild(summary);
+        const pre = document.createElement("pre");
+        const lines = [];
+        if (job.files && job.files.length) {
+          lines.push("Saved:");
+          for (const file of job.files) lines.push("  " + file);
+          lines.push("");
+        }
+        if (job.log && job.log.length) lines.push(...job.log);
+        pre.textContent = lines.join("\n");
+        details.appendChild(pre);
+        card.appendChild(details);
+      }
+      root.appendChild(card);
+    }
+  }
+  renderJobs(initialJobs);
+  async function refreshJobs() {
+    try {
+      const response = await fetch("/api/jobs", {cache:"no-store"});
+      if (response.ok) renderJobs(await response.json());
+    } catch (_) {}
+  }
+  setInterval(refreshJobs, 2000);
+</script>
+</body>
+</html>
