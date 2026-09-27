@@ -198,6 +198,8 @@ def build_command(job):
         "--output",
         OUTPUT_TEMPLATE,
         "--print",
+        "before_dl:__YTDLP_ITEM__=%(playlist_index|0)s/%(playlist_count|0)s",
+        "--print",
         "after_move:__YTDLP_FILE__=%(filepath)s",
     ]
 
@@ -226,6 +228,14 @@ def append_log(job_id, line):
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
+            return
+
+        if line.startswith("__YTDLP_ITEM__="):
+            position = line.split("=", 1)[1]
+            current, separator, total = position.partition("/")
+            if separator and current.isdigit() and total.isdigit():
+                job["current_item"] = int(current)
+                job["total_items"] = int(total)
             return
 
         if line.startswith("__YTDLP_FILE__="):
