@@ -566,6 +566,11 @@ def retry_job(job_id):
             return jsonify({"ok": False, "error": "Job not found."}), 404
         if previous["status"] != "failed":
             return jsonify({"ok": False, "error": "Only failed jobs can be retried."}), 409
+        if any(job.get("retry_of") == job_id for job in jobs.values()):
+            return jsonify({
+                "ok": False,
+                "error": "This attempt has already been retried. Retry the latest failed attempt instead.",
+            }), 409
 
         retry_id = uuid.uuid4().hex[:10]
         completed = min(previous["completed_items"], previous["total_items"]) if previous["total_items"] else previous["completed_items"]
