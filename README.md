@@ -1,10 +1,11 @@
 # yt-dlp music server
 
-Small LAN web interface around [yt-dlp](https://github.com/yt-dlp/yt-dlp). Paste a media URL, inspect whether it resolves to a single item or playlist, queue an audio-only download, and write the result into a Plex-friendly music tree.
+Small LAN web interface around [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [spotDL](https://github.com/spotDL/spotify-downloader). Paste a media URL, queue an audio-only download, and write the result into a Plex-friendly music tree. Spotify URLs use Spotify metadata while spotDL matches the audio from YouTube Music / YouTube.
 
 ## What it does
 
 - Web UI on port **4545**
+- Spotify tracks, albums, playlists and artists via spotDL 4.5.2
 - Automatically probes pasted links before download
 - Shows whether yt-dlp sees a single item or playlist/album, including item count when available
 - Detects YouTube auto-generated album playlists and keeps compilation albums together with a shared Album Artist
@@ -16,8 +17,8 @@ Small LAN web interface around [yt-dlp](https://github.com/yt-dlp/yt-dlp). Paste
 - Embeds source metadata and cover art when available
 - Uses yt-dlp's music metadata fields first
 - Keeps all imports isolated under `YT-DLP Imports/`
-- Uses a persistent yt-dlp download archive to avoid accidental duplicates
-- Includes ffmpeg, Deno, yt-dlp EJS support, curl-cffi, and the BgUtils PO-token provider in the image
+- Uses persistent yt-dlp and spotDL archives to avoid accidental duplicates and support retry/continue
+- Includes ffmpeg, Deno, yt-dlp EJS support, curl-cffi, spotDL, and the BgUtils PO-token provider in the image
 - Optional `cookies.txt` support for sources that require login
 
 ## Library layout
@@ -77,6 +78,37 @@ Then:
 
 Open `http://YOUR-SERVER-IP:4545`.
 
+
+## Spotify / spotDL
+
+Spotify URLs are routed through **spotDL 4.5.2** automatically. No separate page or service is required.
+
+For public Spotify track, album, playlist and artist URLs, spotDL retrieves the Spotify metadata, searches YouTube Music first with YouTube as fallback, downloads audio only, and embeds the Spotify metadata and cover art. spotDL does **not** download the audio stream from Spotify itself.
+
+Spotify output uses:
+
+    YT-DLP Imports/
+      Album Artist/
+        Album/
+          01 - Track [spotify-track-id].opus
+
+The downloader uses:
+
+- OPUS output;
+- `--bitrate disable` to avoid an unnecessary bitrate conversion where possible;
+- one spotDL download thread so the server's queue/progress model remains deterministic;
+- Spotify album artist, album, track number, title, artwork and other embedded metadata;
+- a persistent archive at `/data/state/spotdl-archive.txt`;
+- the existing YouTube BgUtils PO-token configuration through spotDL's `--yt-dlp-args` passthrough;
+- YouTube Music as the first audio match provider, with YouTube as fallback;
+- no lyrics providers.
+
+The normal **Ignore archive and overwrite existing file** option also applies to Spotify. When unchecked, completed Spotify tracks are recorded in the spotDL archive. A failed partial job can therefore use **Retry / continue** and only the missing tracks are attempted again.
+
+spotDL's own processed counter includes failed tracks, so the web UI does not call that value "saved." Saved-track progress is counted separately from successful downloads/existing files, while spotDL's counter is only used to establish the collection size and processing position.
+
+Public Spotify URLs do not require Spotify developer credentials with spotDL's current default metadata client. Authenticated Spotify library shortcuts are outside this web UI's URL-based workflow.
+
 ## Playlist preflight
 
 When a valid URL is pasted, the browser asks the server to inspect it before download.
@@ -118,7 +150,7 @@ A PO token improves compatibility with current YouTube enforcement but cannot gu
 
 ## Duplicate handling
 
-Normal downloads use `/data/state/archive.txt`. yt-dlp records successfully downloaded source IDs there. Submitting the same source again will normally do nothing.
+Normal yt-dlp downloads use `/data/state/archive.txt`. Spotify/spotDL downloads use `/data/state/spotdl-archive.txt`. Each archive records successfully completed source items so retries and repeated submissions can skip tracks that are already complete.
 
 The **Ignore archive and overwrite existing file** checkbox deliberately bypasses that protection.
 
@@ -134,9 +166,9 @@ and add:
 
 to the service environment. Treat the cookie file as a secret.
 
-## Updating yt-dlp
+## Updating yt-dlp and spotDL
 
-yt-dlp changes often because upstream sites change. The image intentionally installs the current PyPI yt-dlp release at build time rather than pinning an old extractor release.
+yt-dlp changes often because upstream sites change. The image intentionally installs the current PyPI yt-dlp release at build time rather than pinning an old extractor release. spotDL is pinned to the tested 4.5.2 release so its CLI and progress behavior remain stable for this app.
 
 Rebuild when downloads start failing:
 
