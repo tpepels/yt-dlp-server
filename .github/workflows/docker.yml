@@ -24,6 +24,7 @@ jobs:
           docker run --rm yt-dlp-server:test deno --version
           docker run --rm yt-dlp-server:test ffmpeg -version
           docker run --rm yt-dlp-server:test sh -c 'spotdl --version | grep -qx 4.5.2'
+          docker run --rm --user 1000:1000 yt-dlp-server:test sh -c 'test -w "$HOME" && spotdl --version | grep -qx 4.5.2'
           docker run --rm yt-dlp-server:test python -c "import importlib.metadata; assert importlib.metadata.version('bgutil-ytdlp-pot-provider') == '2.0.0'"
           docker run --rm --user 1000:1000 yt-dlp-server:test sh -c 'test -f /opt/bgutil-ytdlp-pot-provider/server/src/generate_once.ts && deno run --allow-env --allow-net --allow-ffi=/opt/bgutil-ytdlp-pot-provider/server/node_modules --allow-write=/tmp/yt-dlp-cache/bgutil-ytdlp-pot-provider --allow-read=/tmp/yt-dlp-cache/bgutil-ytdlp-pot-provider,/opt/bgutil-ytdlp-pot-provider/server/node_modules /opt/bgutil-ytdlp-pot-provider/server/src/generate_once.ts --version | grep -qx 2.0.0'
       - name: Validate non-root runtime, naming and playlist classification
