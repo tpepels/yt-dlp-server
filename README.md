@@ -152,6 +152,22 @@ The `/health` endpoint reports whether the provider directory is available and w
 
 A PO token improves compatibility with current YouTube enforcement but cannot guarantee that every YouTube media request will succeed. If YouTube still returns a 403, the job now reports that it failed despite PO-token support instead of showing only a generic yt-dlp exit code.
 
+## Unavailable YouTube playlist tracks
+
+YouTube playlists can contain hidden or removed videos. yt-dlp normally continues downloading the rest of the playlist, but still exits nonzero when an unavailable video is encountered. The server detects errors such as:
+
+    ERROR: [youtube] riu2Bx6miIU: Video unavailable
+
+and exposes the unavailable video as a missing track on the failed job.
+
+The job card offers **Ignore permanently**. Ignored YouTube video IDs are stored at:
+
+    /data/state/ignored-tracks.json
+
+Ignoring does not fabricate or count a file as downloaded. A 13/14 playlist therefore remains 13/14 tracks saved, but the job is closed successfully with `1 ignored`. Future runs of the same playlist may still make yt-dlp encounter the unavailable entry, but the server recognizes that all remaining errors are explicitly ignored and does not leave the job failed again.
+
+Retry remains available until the missing track is ignored, so temporary availability failures can still be retried instead.
+
 ## Persistent queue and restart recovery
 
 Job history and queued work are persisted to:

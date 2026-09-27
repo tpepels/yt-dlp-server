@@ -32,6 +32,7 @@ IMPORT_ROOT = MUSIC_ROOT / IMPORT_SUBDIR
 ARCHIVE_FILE = STATE_DIR / "archive.txt"
 SPOTDL_ARCHIVE_FILE = STATE_DIR / "spotdl-archive.txt"
 JOBS_STATE_FILE = STATE_DIR / "jobs.json"
+IGNORED_TRACKS_FILE = STATE_DIR / "ignored-tracks.json"
 
 for directory in (IMPORT_ROOT, STATE_DIR, TEMP_DIR):
     directory.mkdir(parents=True, exist_ok=True)
@@ -60,6 +61,7 @@ _spotdl_progress_re = re.compile(r"(\d+)/(\d+) complete")
 _spotdl_downloaded_re = re.compile(r'\bDownloaded "')
 _spotdl_existing_re = re.compile(r"\bSkipping .+\(file already exists\)")
 _spotify_track_url_re = re.compile(r"https://open\.spotify\.com/track/[A-Za-z0-9]+(?:\?[^\s]*)?")
+_youtube_error_re = re.compile(r"^ERROR: \[youtube\] ([A-Za-z0-9_-]{6,}): (.+)$")
 _ansi_re = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -119,6 +121,93 @@ def persist_jobs():
         persist_jobs_locked()
 
 
+def load_ignored_tracks():
+    if not IGNORED_TRACKS_FILE.is_file():
+        return {}
+    try:
+        data = json.loads(IGNORED_TRACKS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def persist_ignored_tracks(ignored):
+    tmp_path = IGNORED_TRACKS_FILE.with_suffix(".json.tmp")
+    tmp_path.write_text(
+        json.dumps(ignored, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(tmp_path, IGNORED_TRACKS_FILE)
+
+
+def extract_youtube_missing_tracks(lines, ignored=None):
+    ignored = ignored if ignored is not None else load_ignored_tracks()
+    missing = []
+    seen = set()
+    for line in lines or []:
+        match = _youtube_error_re.match(line.strip())
+        if not match:
+            continue
+        video_id, reason = match.groups()
+        if video_id in seen:
+            continue
+        key = f"youtube:{video_id}"
+        missing.append({
+            "source": "youtube",
+            "source_id": video_id,
+            "label": f"YouTube video {video_id}",
+            "reason": reason,
+            "ignored": key in ignored,
+        })
+        seen.add(video_id)
+    return missing
+
+
+def job_has_only_ignored_youtube_errors(job, ignored=None):
+    ignored = ignored if ignored is not None else load_ignored_tracks()
+    errors = [line.strip() for line in job.get("log", []) if line.strip().startswith("ERROR:")]
+    if not errors:
+        return False
+
+    for line in errors:
+        match = _youtube_error_re.match(line)
+        if not match or f"youtube:{match.group(1)}" not in ignored:
+            return False
+    return True
+
+
+def close_job_if_only_ignored_locked(job, ignored=None):
+    ignored = ignored if ignored is not None else load_ignored_tracks()
+    youtube_missing = extract_youtube_missing_tracks(job.get("log", []), ignored)
+    if youtube_missing:
+        spotify_missing = [
+            item for item in job.get("missing_tracks", [])
+            if item.get("source") != "youtube"
+        ]
+        job["missing_tracks"] = spotify_missing + youtube_missing
+
+    if not job_has_only_ignored_youtube_errors(job, ignored):
+        return False
+
+    ignored_count = len(youtube_missing)
+    job["status"] = "succeeded"
+    job["failed_items"] = 0
+    job["returncode"] = 0
+    job["progress"] = ""
+    if job.get("total_items"):
+        job["message"] = (
+            f"Completed - {job['completed_items']}/{job['total_items']} tracks saved; "
+            f"{ignored_count} ignored"
+        )
+    elif job.get("completed_items"):
+        job["message"] = (
+            f"Completed - {job['completed_items']} tracks saved; {ignored_count} ignored"
+        )
+    else:
+        job["message"] = f"Completed with {ignored_count} ignored unavailable track(s)"
+    return True
+
+
 def normalize_persisted_job(raw):
     if not isinstance(raw, dict) or not raw.get("url"):
         return None
@@ -166,6 +255,12 @@ def normalize_persisted_job(raw):
         "manual_source_url": raw.get("manual_source_url"),
         "download_query": raw.get("download_query"),
     }
+
+    if source == "yt-dlp":
+        youtube_missing = extract_youtube_missing_tracks(job["log"])
+        if youtube_missing:
+            job["missing_tracks"] = youtube_missing
+        close_job_if_only_ignored_locked(job)
 
     # /api/jobs from older versions intentionally exposed less internal state.
     # Reconstruct a queued manual-resolution query when possible.
@@ -742,14 +837,26 @@ def run_job(job_id):
             job = jobs[job_id]
             job["returncode"] = returncode
             job["finished_at"] = time.time()
-            job["failed_items"] = len(spotdl_errors)
-            job["missing_tracks"] = spotdl_missing_tracks
+            job["failed_items"] = (
+                len(spotdl_errors)
+                if is_spotify
+                else len(extract_youtube_missing_tracks(job.get("log", [])))
+            )
+            if is_spotify:
+                job["missing_tracks"] = spotdl_missing_tracks
+            else:
+                job["missing_tracks"] = extract_youtube_missing_tracks(job.get("log", []))
             if spotdl_errors:
                 job["log"].append("spotDL errors:")
                 job["log"].extend(spotdl_errors[-20:])
                 job["log"] = job["log"][-40:]
 
-            failed = returncode != 0 or bool(spotdl_errors)
+            ignored_youtube_only = (
+                not is_spotify
+                and returncode != 0
+                and close_job_if_only_ignored_locked(job)
+            )
+            failed = (returncode != 0 or bool(spotdl_errors)) and not ignored_youtube_only
             if not failed:
                 job["status"] = "succeeded"
                 if is_spotify:
@@ -760,6 +867,8 @@ def run_job(job_id):
                     else:
                         job["message"] = "Completed - nothing new to download"
                     apply_manual_resolution_success(job)
+                elif ignored_youtube_only:
+                    pass
                 elif job["files"]:
                     count = len(job["files"])
                     job["message"] = f"Completed - {count} file{'s' if count != 1 else ''}"
@@ -849,6 +958,10 @@ def public_jobs():
                 "resolution_of": job.get("resolution_of"),
                 "spotify_track_url": job.get("spotify_track_url"),
                 "manual_source_url": job.get("manual_source_url"),
+                "ignored_items": sum(
+                    1 for item in job.get("missing_tracks", [])
+                    if item.get("source") == "youtube" and item.get("ignored")
+                ),
             }
             for job in ordered
         ]
@@ -1023,6 +1136,63 @@ def retry_job(job_id):
     return jsonify({"ok": True, "job_id": retry_id}), 202
 
 
+@app.post("/api/jobs/<job_id>/ignore")
+def ignore_missing_youtube_track(job_id):
+    payload = request.get_json(silent=True) or request.form
+    source_id = (payload.get("source_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,}", source_id):
+        return jsonify({"ok": False, "error": "A valid YouTube video ID is required."}), 400
+
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            return jsonify({"ok": False, "error": "Job not found."}), 404
+        if job.get("source") != "yt-dlp" or job["status"] != "failed":
+            return jsonify({"ok": False, "error": "Only failed yt-dlp jobs can ignore missing tracks."}), 409
+
+        missing = next(
+            (
+                item for item in extract_youtube_missing_tracks(job.get("log", []))
+                if item.get("source_id") == source_id
+            ),
+            None,
+        )
+        if missing is None:
+            return jsonify({"ok": False, "error": "That video is not a missing track in this job."}), 404
+
+        ignored = load_ignored_tracks()
+        key = f"youtube:{source_id}"
+        ignored[key] = {
+            "source": "youtube",
+            "source_id": source_id,
+            "reason": missing.get("reason") or "Unavailable",
+            "ignored_at": time.time(),
+        }
+        try:
+            persist_ignored_tracks(ignored)
+        except OSError as exc:
+            return jsonify({"ok": False, "error": f"Could not persist ignored track: {exc}"}), 500
+
+        # The ignore is global by video ID. Refresh every historical attempt
+        # containing the same unavailable video so stale red failures disappear.
+        for candidate in jobs.values():
+            if candidate.get("source") != "yt-dlp":
+                continue
+            ids = {
+                item.get("source_id")
+                for item in extract_youtube_missing_tracks(candidate.get("log", []), ignored)
+            }
+            if source_id not in ids:
+                continue
+            candidate["missing_tracks"] = extract_youtube_missing_tracks(candidate.get("log", []), ignored)
+            if candidate.get("status") == "failed":
+                close_job_if_only_ignored_locked(candidate, ignored)
+
+        persist_jobs_locked()
+
+    return jsonify({"ok": True, "source_id": source_id}), 200
+
+
 @app.post("/api/jobs/<job_id>/resolve")
 def resolve_missing_spotify_track(job_id):
     payload = request.get_json(silent=True) or request.form
@@ -1150,6 +1320,10 @@ def health():
             "jobs_state": {
                 "path": str(JOBS_STATE_FILE),
                 "persisted": JOBS_STATE_FILE.is_file(),
+            },
+            "ignored_tracks": {
+                "path": str(IGNORED_TRACKS_FILE),
+                "count": len(load_ignored_tracks()),
             },
             "spotify": {
                 "enabled": VERSIONS.get("spotdl", "unavailable") != "unavailable",
