@@ -27,6 +27,39 @@ jobs:
           docker run --rm --user 1000:1000 yt-dlp-server:test sh -c 'test -w "$HOME" && spotdl --version | grep -qx 4.5.2'
           docker run --rm yt-dlp-server:test python -c "import importlib.metadata; assert importlib.metadata.version('bgutil-ytdlp-pot-provider') == '2.0.0'"
           docker run --rm --user 1000:1000 yt-dlp-server:test sh -c 'test -f /opt/bgutil-ytdlp-pot-provider/server/src/generate_once.ts && deno run --allow-env --allow-net --allow-ffi=/opt/bgutil-ytdlp-pot-provider/server/node_modules --allow-write=/tmp/yt-dlp-cache/bgutil-ytdlp-pot-provider --allow-read=/tmp/yt-dlp-cache/bgutil-ytdlp-pot-provider,/opt/bgutil-ytdlp-pot-provider/server/node_modules /opt/bgutil-ytdlp-pot-provider/server/src/generate_once.ts --version | grep -qx 2.0.0'
+      - name: Validate Chrome extension
+        run: |
+          python -m json.tool chrome-extension/manifest.json >/dev/null
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path("chrome-extension/manifest.json").read_text())
+          assert manifest["manifest_version"] == 3
+          assert manifest["background"]["service_worker"] == "service-worker.js"
+          assert manifest["options_page"] == "options.html"
+          assert set(manifest["permissions"]) == {
+              "activeTab", "contextMenus", "scripting", "storage"
+          }
+          assert "http://*/*" in manifest["optional_host_permissions"]
+          assert "https://*/*" in manifest["optional_host_permissions"]
+
+          worker = Path("chrome-extension/service-worker.js").read_text()
+          assert 'contexts: ["link", "selection"]' in worker
+          assert 'body.set("playlist", "on")' in worker
+          assert '"/api/probe"' in worker
+          assert '"/download"' in worker
+          assert "MAX_SELECTION_URLS = 20" in worker
+          assert "range.intersectsNode(anchor)" in worker
+
+          options = Path("chrome-extension/options.js").read_text()
+          assert "chrome.permissions.request" in options
+          assert '"/health"' in options
+          PY
+          docker run --rm \
+            -v "$PWD/chrome-extension:/extension:ro" \
+            yt-dlp-server:test deno eval \
+            'new Function(await Deno.readTextFile("/extension/service-worker.js")); new Function(await Deno.readTextFile("/extension/options.js"));'
       - name: Validate non-root runtime, naming and playlist classification
         run: |
           docker run --rm --user 1000:1000 \
