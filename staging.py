@@ -7,6 +7,8 @@ import uuid
 from collections import Counter
 from pathlib import Path
 
+from mutagen import File as MutagenFile
+
 MEDIA_EXTENSIONS = {
     ".aac", ".flac", ".m4a", ".mka", ".mp3", ".mp4",
     ".ogg", ".opus", ".wav", ".webm",
@@ -273,7 +275,53 @@ def analyze_stage(temp_dir, job):
     return result
 
 
-def retag_media(path, album, album_artist, track_artist=""):
+def _set_mutagen_tag(audio, key, value):
+    if not value:
+        return False
+    try:
+        audio[key] = [value]
+        return True
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _retag_with_mutagen(path, album, album_artist, track_artist=""):
+    """Edit tags in place so embedded artwork/auxiliary streams stay intact."""
+    try:
+        audio = MutagenFile(str(path), easy=True)
+    except Exception:
+        return False
+    if audio is None:
+        return False
+
+    try:
+        if audio.tags is None:
+            audio.add_tags()
+
+        if not _set_mutagen_tag(audio, "album", album):
+            return False
+
+        # albumartist is the canonical easy-tag spelling. Vorbis/Opus/FLAC
+        # comments accept it directly; EasyID3/EasyMP4 map it appropriately.
+        if not _set_mutagen_tag(audio, "albumartist", album_artist):
+            return False
+
+        if track_artist and not _set_mutagen_tag(audio, "artist", track_artist):
+            return False
+
+        audio.save()
+        return True
+    except Exception:
+        return False
+
+
+def _retag_audio_only_with_ffmpeg(path, album, album_artist, track_artist=""):
+    """Fallback for formats mutagen cannot edit.
+
+    Only map the primary audio stream. Mapping every input stream is unsafe for
+    Opus/Ogg because ffmpeg can expose embedded artwork as another stream that
+    the output container cannot mux.
+    """
     path = Path(path)
     tmp = path.with_name(f".{path.stem}.retag-{uuid.uuid4().hex[:8]}{path.suffix}")
     cmd = [
@@ -283,8 +331,11 @@ def retag_media(path, album, album_artist, track_artist=""):
         "-loglevel", "error",
         "-y",
         "-i", str(path),
-        "-map", "0",
-        "-c", "copy",
+        "-map", "0:a:0",
+        "-vn",
+        "-sn",
+        "-dn",
+        "-c:a", "copy",
         "-map_metadata", "0",
         "-metadata", f"album={album}",
         "-metadata", f"album_artist={album_artist}",
@@ -304,7 +355,7 @@ def retag_media(path, album, album_artist, track_artist=""):
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip()
             raise RuntimeError(
-                f"ffmpeg metadata update failed for {path.name}: "
+                f"metadata update failed for {path.name}: "
                 f"{detail or completed.returncode}"
             )
         os.replace(tmp, path)
@@ -314,6 +365,20 @@ def retag_media(path, album, album_artist, track_artist=""):
                 tmp.unlink()
             except OSError:
                 pass
+
+
+def retag_media(path, album, album_artist, track_artist=""):
+    path = Path(path)
+    if _retag_with_mutagen(path, album, album_artist, track_artist):
+        return
+    _retag_audio_only_with_ffmpeg(path, album, album_artist, track_artist)
+
+
+def discard_stage(temp_dir, job):
+    """Delete an unpublished collection's staging directory."""
+    path = stage_dir(temp_dir, job)
+    shutil.rmtree(path, ignore_errors=True)
+    return path
 
 
 def publish_stage(temp_dir, import_root, job, artist=None, album=None):
