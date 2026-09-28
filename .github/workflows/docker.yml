@@ -33,7 +33,60 @@ jobs:
             -e MUSIC_ROOT=/tmp/music \
             -e STATE_DIR=/tmp/state \
             -e TEMP_DIR=/tmp/work \
-            yt-dlp-server:test python -c 'import app, yt_dlp; y=yt_dlp.YoutubeDL({"outtmpl": app.OUTPUT_TEMPLATE}); p=y.prepare_filename({"id":"abc123","title":"Fallback title","ext":"webm","artist":"Test Artist","album":"Test Album","track":"Test Track","track_number":1}); assert "/" not in p, p; assert p.endswith("Test Track [abc123].webm"), p; q=y.prepare_filename({"id":"def456","title":"Loose Song","ext":"m4a","uploader":"Test Uploader"}); assert "/" not in q and q.endswith("Loose Song [def456].m4a"), q; assert "Test Uploader" not in q; assert app.classify_probe_info({"_type":"playlist","title":"Album","playlist_count":12}) == {"kind":"playlist","title":"Album","count":12,"extractor":None,"album_mode":False,"album_artist":None}; assert app.classify_probe_info({"_type":"video","title":"Track"})["kind"] == "single"; assert app.classify_probe_info({"_type":"playlist","title":"Release"}, url="https://example.bandcamp.com/album/release")["album_mode"] is True; assert app.classify_probe_info({"_type":"playlist","title":"Mix"}, url="https://youtube.com/playlist?list=PL123")["album_mode"] is False; print(p); print(q)'
+            yt-dlp-server:test python -c 'import app, yt_dlp; y=yt_dlp.YoutubeDL({"outtmpl": app.OUTPUT_TEMPLATE}); p=y.prepare_filename({"id":"abc123","title":"Fallback title","ext":"webm","artist":"Test Artist","album":"Test Album","track":"Test Track","track_number":1}); assert "/" not in p, p; assert p.endswith("Test Track [abc123].webm"), p; q=y.prepare_filename({"id":"def456","title":"Loose Song","ext":"m4a","uploader":"Test Uploader"}); assert "/" not in q and q.endswith("Loose Song [def456].m4a"), q; assert "Test Uploader" not in q; assert app.classify_probe_info({"_type":"playlist","title":"Album","playlist_count":12}) == {"kind":"playlist","title":"Album","count":12,"extractor":None,"album_mode":False,"album_artist":None,"thumbnail":None}; assert app.classify_probe_info({"_type":"video","title":"Track"})["kind"] == "single"; assert app.classify_probe_info({"_type":"playlist","title":"Release"}, url="https://example.bandcamp.com/album/release")["album_mode"] is True; assert app.classify_probe_info({"_type":"playlist","title":"Mix"}, url="https://youtube.com/playlist?list=PL123")["album_mode"] is False; print(p); print(q)'
+      - name: Validate release card metadata
+        run: |
+          docker run --rm --user 1000:1000 \
+            -e MUSIC_ROOT=/tmp/music \
+            -e STATE_DIR=/tmp/state \
+            -e TEMP_DIR=/tmp/work \
+            yt-dlp-server:test python - <<'PY'
+          import app
+
+          info = {
+              "_type": "playlist",
+              "title": "Album Title",
+              "playlist_count": 9,
+              "album": "Album Title",
+              "album_artist": "Album Artist",
+              "thumbnail": "https://example.invalid/cover.jpg",
+          }
+          result = app.classify_probe_info(
+              info,
+              url="https://music.youtube.com/playlist?list=OLAK5uy_test",
+          )
+          assert result["title"] == "Album Title", result
+          assert result["album_artist"] == "Album Artist", result
+          assert result["thumbnail"] == "https://example.invalid/cover.jpg", result
+
+          # Prefer the last available thumbnail when no canonical thumbnail
+          # field is supplied.
+          assert app.best_thumbnail_url({
+              "thumbnails": [
+                  {"url": "https://example.invalid/small.jpg"},
+                  {"url": "https://example.invalid/large.jpg"},
+              ]
+          }) == "https://example.invalid/large.jpg"
+
+          raw = {
+              "id": "card1",
+              "url": "https://example.invalid/album",
+              "status": "queued",
+              "source": "yt-dlp",
+              "playlist": True,
+              "album_mode": True,
+              "source_title": "Visible Album",
+              "source_album_artist": "Visible Artist",
+              "source_thumbnail": "https://example.invalid/art.jpg",
+          }
+          job = app.normalize_persisted_job(raw)
+          app.jobs.clear()
+          app.jobs[job["id"]] = job
+          public = app.public_jobs()[0]
+          assert public["source_title"] == "Visible Album", public
+          assert public["source_album_artist"] == "Visible Artist", public
+          assert public["source_thumbnail"] == "https://example.invalid/art.jpg", public
+          PY
       - name: Validate album grouping and item progress
         run: |
           docker run --rm --user 1000:1000 \
@@ -67,6 +120,12 @@ jobs:
           grep -q "Hint: this doesn't look like an album" templates/index.html
           grep -q 'probe hint' templates/index.html
           grep -q '/api/jobs/' templates/index.html
+          grep -q 'job.source_thumbnail' templates/index.html
+          grep -q 'job.metadata_album' templates/index.html
+          grep -q 'job.source_title' templates/index.html
+          grep -q 'job.source_album_artist' templates/index.html
+          grep -q 'Open source' templates/index.html
+          grep -q 'target = "_blank"' templates/index.html
       - name: Validate staged metadata gate
         run: |
           docker run --rm --user 1000:1000 \
