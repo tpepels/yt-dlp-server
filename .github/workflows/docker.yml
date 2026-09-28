@@ -19,7 +19,7 @@ jobs:
         run: docker build -t yt-dlp-server:test .
       - name: Smoke-test installed tools
         run: |
-          docker run --rm yt-dlp-server:test python -m py_compile /app/app.py /app/staging.py
+          docker run --rm yt-dlp-server:test python -m py_compile /app/app.py /app/staging.py /app/tools/repair_legacy_imports.py
           docker run --rm yt-dlp-server:test yt-dlp --version
           docker run --rm yt-dlp-server:test deno --version
           docker run --rm yt-dlp-server:test ffmpeg -version
@@ -114,9 +114,38 @@ jobs:
 
           analysis = staging.analyze_stage(temp, job)
           assert analysis["album"] == "ARMCHAIR BOOGIE", analysis
-          assert analysis["artist"] == "Various Artists", analysis
+          assert analysis["artist"] == "", analysis
+          assert analysis["needs_metadata"] is True, analysis
+          assert {r["artist"] for r in analysis["records"]} == {"Michael Hurley", "Cat Power"}
           assert all("MockyRock" not in r["artist"] for r in analysis["records"])
           assert all("Miranda" not in r["artist"] for r in analysis["records"])
+
+          # Real music artist metadata is strong enough for collection-level
+          # grouping, including a genuine various-artists album.
+          safe = {
+              "id": "safe",
+              "staging_owner_id": "safe",
+              "source": "yt-dlp",
+              "playlist": True,
+              "source_title": "Trusted Compilation",
+              "source_album_artist": None,
+              "force": False,
+          }
+          safe_stage = staging.ensure_stage_dir(temp, safe)
+          for n, (source_id, artist) in enumerate((("ddd444", "Artist A"), ("eee555", "Artist B")), 1):
+              info = {
+                  "id": source_id,
+                  "title": f"{artist} - Track {n}",
+                  "playlist_title": "Trusted Compilation",
+                  "artist": artist,
+                  "album": "[Unknown Album]",
+              }
+              (safe_stage / f"{n:02d} - track [{source_id}].info.json").write_text(json.dumps(info))
+              (safe_stage / f"{n:02d} - track [{source_id}].opus").write_bytes(b"placeholder")
+          safe_analysis = staging.analyze_stage(temp, safe)
+          assert safe_analysis["album"] == "Trusted Compilation", safe_analysis
+          assert safe_analysis["artist"] == "Various Artists", safe_analysis
+          assert safe_analysis["needs_metadata"] is False, safe_analysis
 
           # A single item with no album must stop before the library. Use a
           # real tiny Opus file so the manual publish also exercises retagging.
