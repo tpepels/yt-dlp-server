@@ -30,6 +30,9 @@ YOUTUBE_PLAYER_CLIENT = os.getenv("YOUTUBE_PLAYER_CLIENT", "mweb").strip() or "m
 if not IMPORT_SUBDIR or Path(IMPORT_SUBDIR).is_absolute() or ".." in Path(IMPORT_SUBDIR).parts:
     raise RuntimeError("IMPORT_SUBDIR must be a safe relative path")
 
+if TEMP_DIR.resolve() == MUSIC_ROOT.resolve() or MUSIC_ROOT.resolve() in TEMP_DIR.resolve().parents:
+    raise RuntimeError("TEMP_DIR must be outside MUSIC_ROOT so staging cannot be indexed by Plex")
+
 IMPORT_ROOT = MUSIC_ROOT / IMPORT_SUBDIR
 ARCHIVE_FILE = STATE_DIR / "archive.txt"
 SPOTDL_ARCHIVE_FILE = STATE_DIR / "spotdl-archive.txt"
