@@ -784,6 +784,110 @@ def append_log(job_id, line):
         job["log"].append(line)
         job["log"] = job["log"][-40:]
 
+def finalize_staged_job(job_id):
+    with jobs_lock:
+        source_job = jobs.get(job_id)
+        if not source_job:
+            return None
+
+        target_id = source_job.get("finalize_target_id") or job_id
+        target_job = jobs.get(target_id) or source_job
+        target_id = target_job["id"]
+
+        # Manual resolution/retry jobs can share the original collection's
+        # staging directory. Keep the target pointed at that same owner.
+        if not target_job.get("staging_owner_id") and source_job.get("staging_owner_id"):
+            target_job["staging_owner_id"] = source_job["staging_owner_id"]
+
+        target_job["status"] = "finalizing"
+        target_job["message"] = "Validating metadata before library import"
+        persist_jobs_locked()
+
+        snapshot = dict(target_job)
+        artist_override = target_job.get("metadata_artist")
+        album_override = target_job.get("metadata_album")
+
+    try:
+        result = library_staging.publish_stage(
+            TEMP_DIR,
+            IMPORT_ROOT,
+            snapshot,
+            artist=artist_override,
+            album=album_override,
+        )
+    except Exception as exc:
+        result = {
+            "status": "error",
+            "message": str(exc),
+            "artist": artist_override or "",
+            "album": album_override or "",
+            "media_count": 0,
+        }
+
+    with jobs_lock:
+        target_job = jobs.get(target_id)
+        source_job = jobs.get(job_id)
+        if not target_job:
+            return result
+
+        target_job["metadata_artist"] = result.get("artist") or ""
+        target_job["metadata_album"] = result.get("album") or ""
+        target_job["staged_files"] = int(result.get("media_count") or 0)
+
+        if result["status"] == "needs_metadata":
+            target_job["status"] = "needs_metadata"
+            target_job["message"] = (
+                f"Ready to import - {target_job['staged_files']} staged file(s); "
+                "confirm artist and album"
+            )
+        elif result["status"] == "published":
+            target_job["status"] = "succeeded"
+            target_job["progress"] = ""
+            target_job["failed_items"] = 0
+            target_job["final_dir"] = result.get("final_dir")
+            target_job["files"] = list(result.get("files") or [])
+            target_job["staged_files"] = 0
+            target_job["finished_at"] = time.time()
+
+            ignored_count = sum(
+                1 for item in target_job.get("missing_tracks", [])
+                if item.get("source") == "youtube" and item.get("ignored")
+            )
+            artist = result.get("artist") or ""
+            album = result.get("album") or ""
+            if target_job.get("total_items"):
+                suffix = f"; {ignored_count} ignored" if ignored_count else ""
+                target_job["message"] = (
+                    f"Published - {target_job['completed_items']}/{target_job['total_items']} "
+                    f"tracks saved{suffix} - {artist} / {album}"
+                )
+            else:
+                target_job["message"] = (
+                    f"Published - {len(target_job['files'])} file(s) - {artist} / {album}"
+                )
+        else:
+            target_job["status"] = "failed"
+            target_job["message"] = f"Library import failed: {result.get('message') or 'unknown error'}"
+            target_job["finished_at"] = time.time()
+
+        if source_job and source_job["id"] != target_job["id"]:
+            if result["status"] == "published":
+                source_job["status"] = "succeeded"
+                source_job["message"] = "Resolved missing track - album published"
+                source_job["finished_at"] = time.time()
+            elif result["status"] == "needs_metadata":
+                source_job["status"] = "succeeded"
+                source_job["message"] = "Resolved missing track - album waiting for metadata"
+                source_job["finished_at"] = time.time()
+            else:
+                source_job["status"] = "failed"
+                source_job["message"] = target_job["message"]
+                source_job["finished_at"] = time.time()
+
+        persist_jobs_locked()
+    return result
+
+
 def run_job(job_id):
     with jobs_lock:
         job = jobs[job_id]
@@ -826,6 +930,7 @@ def run_job(job_id):
 
         spotdl_missing_tracks = extract_spotdl_missing_tracks(spotdl_errors)
 
+        should_finalize = False
         with jobs_lock:
             job = jobs[job_id]
             job["returncode"] = returncode
@@ -852,6 +957,11 @@ def run_job(job_id):
             failed = (returncode != 0 or bool(spotdl_errors)) and not ignored_youtube_only
             if not failed:
                 job["status"] = "succeeded"
+                should_finalize = bool(
+                    library_staging.media_files(
+                        library_staging.stage_dir(TEMP_DIR, job)
+                    )
+                )
                 if is_spotify:
                     if job["total_items"]:
                         job["message"] = f"Completed - {job['completed_items']}/{job['total_items']} tracks saved"
@@ -885,6 +995,9 @@ def run_job(job_id):
                 else:
                     job["message"] = f"yt-dlp exited with code {returncode}"
             persist_jobs_locked()
+
+        if should_finalize:
+            finalize_staged_job(job_id)
     except Exception as exc:
         with jobs_lock:
             job = jobs[job_id]
@@ -955,6 +1068,11 @@ def public_jobs():
                     1 for item in job.get("missing_tracks", [])
                     if item.get("source") == "youtube" and item.get("ignored")
                 ),
+                "staging_owner_id": job.get("staging_owner_id"),
+                "metadata_artist": job.get("metadata_artist") or "",
+                "metadata_album": job.get("metadata_album") or "",
+                "staged_files": job.get("staged_files", 0),
+                "final_dir": job.get("final_dir"),
             }
             for job in ordered
         ]
@@ -1033,6 +1151,14 @@ def download():
         "spotify_track_url": None,
         "manual_source_url": None,
         "download_query": None,
+        "staging_owner_id": job_id,
+        "source_title": probe_result.get("title") if probe_result else None,
+        "source_album_artist": probe_result.get("album_artist") if probe_result else None,
+        "metadata_artist": None,
+        "metadata_album": None,
+        "staged_files": 0,
+        "final_dir": None,
+        "finalize_target_id": None,
     }
 
     with jobs_lock:
@@ -1114,6 +1240,14 @@ def retry_job(job_id):
             "spotify_track_url": None,
             "manual_source_url": None,
             "download_query": None,
+            "staging_owner_id": previous.get("staging_owner_id") or retry_id,
+            "source_title": previous.get("source_title"),
+            "source_album_artist": previous.get("source_album_artist"),
+            "metadata_artist": previous.get("metadata_artist"),
+            "metadata_album": previous.get("metadata_album"),
+            "staged_files": previous.get("staged_files", 0),
+            "final_dir": None,
+            "finalize_target_id": None,
         }
         jobs[retry_id] = retry
         persist_jobs_locked()
@@ -1254,6 +1388,14 @@ def resolve_missing_spotify_track(job_id):
             "spotify_track_url": spotify_url,
             "manual_source_url": source_url,
             "download_query": f"{source_url}|{spotify_url}",
+            "staging_owner_id": parent.get("staging_owner_id") or resolution_id,
+            "source_title": parent.get("source_title"),
+            "source_album_artist": parent.get("source_album_artist"),
+            "metadata_artist": parent.get("metadata_artist"),
+            "metadata_album": parent.get("metadata_album"),
+            "staged_files": parent.get("staged_files", 0),
+            "final_dir": None,
+            "finalize_target_id": job_id,
         }
         jobs[resolution_id] = resolution
         persist_jobs_locked()
