@@ -587,12 +587,19 @@ def classify_probe_info(info, url=None):
     if not isinstance(count, int) or count < 1:
         count = len(entries) if isinstance(entries, list) and entries else None
 
-    album_mode = bool(url and is_youtube_album_playlist(url))
+    extractor = str(info.get("extractor_key") or info.get("extractor") or "")
+    path = urlparse(url).path.lower() if url else ""
+    album_mode = bool(
+        (url and is_youtube_album_playlist(url))
+        or info.get("album")
+        or "/album/" in path
+        or "album" in extractor.lower()
+    )
     return {
         "kind": kind,
         "title": info.get("title") or info.get("fulltitle") or "Untitled",
         "count": count,
-        "extractor": info.get("extractor_key") or info.get("extractor"),
+        "extractor": extractor or None,
         "album_mode": album_mode,
         "album_artist": infer_album_artist(info) if album_mode else None,
     }
