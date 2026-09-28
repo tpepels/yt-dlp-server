@@ -138,20 +138,20 @@ def topic_artist(info):
     return ""
 
 
-def unique_consensus(values):
+def unique_consensus(values, total):
     cleaned = [value for value in values if value]
     unique = staging.unique_values(cleaned)
-    if len(unique) == 1:
+    if len(unique) == 1 and len(cleaned) > total / 2:
         return unique[0], len(cleaned)
     return "", 0
 
 
-def majority_value(values):
+def majority_value(values, total):
     cleaned = [value for value in values if value]
     if not cleaned:
         return "", 0
     value, count = Counter(cleaned).most_common(1)[0]
-    if count > len(cleaned) / 2:
+    if count > total / 2:
         return value, count
     return "", 0
 
@@ -175,13 +175,13 @@ def collection_metadata(info, is_playlist):
         staging.clean_album_name(entry.get("album"))
         for entry in entries
     ]
-    album, album_count = unique_consensus(explicit_albums)
+    album, album_count = unique_consensus(explicit_albums, len(entries))
     album_evidence = (
         f"track album metadata ({album_count}/{len(entries)})"
         if album else ""
     )
     if not album:
-        album, album_count = majority_value(explicit_albums)
+        album, album_count = majority_value(explicit_albums, len(entries))
         if album:
             album_evidence = (
                 f"majority track album metadata ({album_count}/{len(entries)})"
@@ -212,7 +212,9 @@ def collection_metadata(info, is_playlist):
         staging.clean_artist_name(entry.get("album_artist"))
         for entry in entries
     ]
-    album_artist, artist_count = unique_consensus(explicit_album_artists)
+    album_artist, artist_count = unique_consensus(
+        explicit_album_artists, len(entries)
+    )
     artist_evidence = (
         f"album_artist metadata ({artist_count}/{len(entries)})"
         if album_artist else ""
@@ -220,7 +222,9 @@ def collection_metadata(info, is_playlist):
 
     if not album_artist:
         topic_artists = [topic_artist(entry) for entry in entries]
-        album_artist, artist_count = unique_consensus(topic_artists)
+        album_artist, artist_count = unique_consensus(
+            topic_artists, len(entries)
+        )
         if album_artist:
             artist_evidence = (
                 f"stable Artist - Topic channel ({artist_count}/{len(entries)})"
@@ -231,7 +235,9 @@ def collection_metadata(info, is_playlist):
             staging.clean_artist_name(entry.get("artist"))
             for entry in entries
         ]
-        album_artist, artist_count = unique_consensus(track_artists)
+        album_artist, artist_count = unique_consensus(
+            track_artists, len(entries)
+        )
         if album_artist:
             artist_evidence = (
                 f"consistent track artist metadata ({artist_count}/{len(entries)})"
