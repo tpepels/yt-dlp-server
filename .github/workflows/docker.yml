@@ -207,8 +207,8 @@ jobs:
             yt-dlp-server:test python - <<'PY'
           import tools.repair_legacy_imports as repair
 
-          # Regression: a playlist-level field such as "Release" must never
-          # beat stable per-track YouTube Music metadata.
+          # Regression: a bogus generic "Release - Topic" channel must not
+          # beat the real artist shared across the track credits.
           iceberg = {
               "title": "The Iceberg",
               "artist": "Release",
@@ -217,19 +217,19 @@ jobs:
                       "id": "aaa111",
                       "album": "The Iceberg",
                       "artist": "Oddisee",
-                      "uploader": "Oddisee - Topic",
+                      "uploader": "Release - Topic",
                   },
                   {
                       "id": "bbb222",
                       "album": "The Iceberg",
                       "artist": "Oddisee, Toine",
-                      "uploader": "Oddisee - Topic",
+                      "uploader": "Release - Topic",
                   },
                   {
                       "id": "ccc333",
                       "album": "The Iceberg",
                       "artist": "Oddisee, Olivier St.Louis",
-                      "uploader": "Oddisee - Topic",
+                      "uploader": "Release - Topic",
                   },
               ],
           }
@@ -238,7 +238,7 @@ jobs:
           )
           assert artist == "Oddisee", (artist, evidence)
           assert album == "The Iceberg", (album, evidence)
-          assert "Topic" in evidence["artist"], evidence
+          assert "common credited artist" in evidence["artist"], evidence
           assert set(per_track) == {"aaa111", "bbb222", "ccc333"}
 
           # Missing artist fields are recoverable from a stable Topic channel.
@@ -258,6 +258,49 @@ jobs:
           )
           assert artist == "billy woods", (artist, evidence)
           assert album == "Aethiopes", (album, evidence)
+
+          # Featured collaborators should not prevent recovering the
+          # principal album artist when one credited artist is common to a
+          # majority of tracks.
+          featured = {
+              "title": "Vulture Prince",
+              "entries": [
+                  {
+                      "id": f"vp{i:04d}",
+                      "album": "Vulture Prince",
+                      "artist": (
+                          "Arooj Aftab, Guest Artist"
+                          if i in {1, 4}
+                          else "Arooj Aftab"
+                      ),
+                  }
+                  for i in range(7)
+              ],
+          }
+          artist, album, _, evidence = repair.collection_metadata(
+              featured, True
+          )
+          assert artist == "Arooj Aftab", (artist, evidence)
+          assert "common credited artist" in evidence["artist"], evidence
+
+          # If two contributors are equally ubiquitous, do not guess.
+          ambiguous = {
+              "title": "Duo",
+              "entries": [
+                  {
+                      "id": f"duo{i:02d}",
+                      "album": "Duo",
+                      "artist": "Artist A, Artist B",
+                  }
+                  for i in range(8)
+              ],
+          }
+          artist, album, _, evidence = repair.collection_metadata(
+              ambiguous, True
+          )
+          # Exact consistency is trustworthy as the supplied album-credit
+          # string, so preserve the full duo rather than arbitrarily picking A.
+          assert artist == "Artist A, Artist B", (artist, evidence)
 
           # One populated field in a whole album is not enough evidence.
           weak = {
