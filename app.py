@@ -1505,13 +1505,15 @@ def api_probe():
         return jsonify({"ok": False, "error": error}), 400
 
     if is_spotify_url(url):
+        spotify_type = spotify_link_type(url)
         return jsonify({
             "ok": True,
             "kind": "spotify",
-            "title": f"Spotify {spotify_link_type(url)}",
+            "title": f"Spotify {spotify_type}",
             "count": None,
             "extractor": "spotDL",
-            "album_mode": False,
+            "album_mode": spotify_type == "album",
+            "is_album": spotify_type == "album",
             "album_artist": None,
         })
 
@@ -1522,7 +1524,11 @@ def api_probe():
     except RuntimeError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 502
 
-    return jsonify({"ok": True, **result})
+    return jsonify({
+        "ok": True,
+        **result,
+        "is_album": bool(result.get("album_mode")),
+    })
 
 
 @app.get("/api/jobs")
