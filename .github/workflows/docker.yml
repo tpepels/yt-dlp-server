@@ -301,6 +301,24 @@ jobs:
               repair.subprocess.run = real_run
           assert "--flat-playlist" not in captured, captured
           assert "--yes-playlist" in captured, captured
+
+          # The reviewed dry-run metadata should be reused by --apply.
+          import pathlib
+          import tempfile
+          cache = pathlib.Path(tempfile.mkdtemp())
+          calls = []
+          repair.subprocess.run = lambda cmd, **kwargs: (
+              calls.append(cmd) or Completed()
+          )
+          try:
+              url = "https://music.youtube.com/playlist?list=OLAK5uy_cache"
+              first = repair.probe_source(url, True, cache_dir=cache)
+              second = repair.probe_source(url, True, cache_dir=cache)
+          finally:
+              repair.subprocess.run = real_run
+          assert first == second
+          assert len(calls) == 1, calls
+          assert list(cache.glob("*.json")), list(cache.iterdir())
           PY
       - name: Validate persistent queue state
         run: |
