@@ -90,7 +90,25 @@ def youtube_probe_args(url):
     return args
 
 
-def probe_source(url, is_playlist):
+def probe_cache_path(cache_dir, url, is_playlist):
+    if not cache_dir:
+        return None
+    token = hashlib.sha256(
+        f"full-v2|{int(bool(is_playlist))}|{url}".encode("utf-8")
+    ).hexdigest()[:24]
+    return Path(cache_dir) / f"{token}.json"
+
+
+def probe_source(url, is_playlist, cache_dir=None, refresh=False):
+    cache_path = probe_cache_path(cache_dir, url, is_playlist)
+    if cache_path and cache_path.is_file() and not refresh:
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached = None
+        if isinstance(cached, dict):
+            return cached
+
     command = [
         "yt-dlp",
         "--dump-single-json",
@@ -124,6 +142,14 @@ def probe_source(url, is_playlist):
                 detail or "yt-dlp returned invalid metadata JSON"
             ) from exc
         if isinstance(info, dict):
+            if cache_path:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = cache_path.with_suffix(".json.tmp")
+                tmp.write_text(
+                    json.dumps(info, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                os.replace(tmp, cache_path)
             return info
 
     detail = (completed.stderr or completed.stdout or "").strip()
@@ -406,10 +432,17 @@ def main():
             "album-only and leaves standalone watch URLs untouched."
         ),
     )
+    parser.add_argument(
+        "--refresh-metadata",
+        action="store_true",
+        help="Ignore cached full-metadata probes and query sources again.",
+    )
     args = parser.parse_args()
 
     import_root = Path(args.music_root) / args.import_subdir.strip("/\\")
-    jobs_file = Path(args.state_dir) / "jobs.json"
+    state_dir = Path(args.state_dir)
+    jobs_file = state_dir / "jobs.json"
+    metadata_cache = state_dir / "repair-metadata-cache"
     groups = collect_groups(load_jobs(jobs_file), import_root, args.url)
 
     if not groups:
@@ -441,7 +474,12 @@ def main():
         actual_playlist = not is_single_video_url(url) and group["playlist"]
 
         try:
-            info = probe_source(url, actual_playlist)
+            info = probe_source(
+                url,
+                actual_playlist,
+                cache_dir=metadata_cache,
+                refresh=args.refresh_metadata,
+            )
             album_artist, album, per_track, evidence = collection_metadata(
                 info, actual_playlist
             )
