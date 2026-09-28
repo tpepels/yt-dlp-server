@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
+import re
 from collections import Counter
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -156,12 +157,64 @@ def probe_source(url, is_playlist, cache_dir=None, refresh=False):
     raise RuntimeError(detail or f"yt-dlp exited {completed.returncode}")
 
 
+GENERIC_TOPIC_ARTISTS = {
+    "release",
+    "various",
+    "various artists",
+    "music",
+    "topic",
+    "unknown artist",
+}
+
+
 def topic_artist(info):
     for key in ("uploader", "channel"):
         raw = str(info.get(key) or "").strip()
         if raw.lower().endswith(" - topic"):
-            return staging.clean_artist_name(raw)
+            artist = staging.clean_artist_name(raw)
+            if artist.lower() not in GENERIC_TOPIC_ARTISTS:
+                return artist
     return ""
+
+
+def split_artist_credits(value):
+    value = staging.clean_artist_name(value)
+    if not value:
+        return []
+
+    parts = re.split(
+        r"\s*(?:,|;|\s+&\s+|\s+and\s+|\s+feat\.?\s+|"
+        r"\s+featuring\s+|\s+with\s+|\s+x\s+)\s*",
+        value,
+        flags=re.IGNORECASE,
+    )
+    cleaned = []
+    for part in parts:
+        part = staging.clean_artist_name(part)
+        if part and part.lower() not in GENERIC_TOPIC_ARTISTS:
+            cleaned.append(part)
+    return staging.unique_values(cleaned)
+
+
+def common_contributor(values, total):
+    counts = Counter()
+    for value in values:
+        for contributor in set(split_artist_credits(value)):
+            counts[contributor] += 1
+
+    if not counts:
+        return "", 0
+
+    ranked = counts.most_common()
+    best, count = ranked[0]
+    runner_up = ranked[1][1] if len(ranked) > 1 else 0
+
+    # Require a majority of the album's tracks and a unique lead. If two
+    # contributors are equally ubiquitous, the album-artist decision is
+    # ambiguous and should remain unresolved instead of guessing.
+    if count > total / 2 and count > runner_up:
+        return best, count
+    return "", 0
 
 
 def unique_consensus(values, total):
@@ -256,17 +309,27 @@ def collection_metadata(info, is_playlist):
                 f"stable Artist - Topic channel ({artist_count}/{len(entries)})"
             )
 
+    track_artists = [
+        staging.clean_artist_name(entry.get("artist"))
+        for entry in entries
+    ]
+
     if not album_artist:
-        track_artists = [
-            staging.clean_artist_name(entry.get("artist"))
-            for entry in entries
-        ]
         album_artist, artist_count = unique_consensus(
             track_artists, len(entries)
         )
         if album_artist:
             artist_evidence = (
                 f"consistent track artist metadata ({artist_count}/{len(entries)})"
+            )
+
+    if not album_artist:
+        album_artist, artist_count = common_contributor(
+            track_artists, len(entries)
+        )
+        if album_artist:
+            artist_evidence = (
+                f"common credited artist ({artist_count}/{len(entries)})"
             )
 
     evidence = {
