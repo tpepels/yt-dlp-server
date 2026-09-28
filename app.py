@@ -1190,7 +1190,11 @@ def download():
         "download_query": None,
         "staging_owner_id": job_id,
         "source_title": probe_result.get("title") if probe_result else None,
-        "source_album_artist": probe_result.get("album_artist") if probe_result else None,
+        "source_album_artist": (
+            probe_result.get("album_artist")
+            if probe_result and album_mode
+            else None
+        ),
         "metadata_artist": None,
         "metadata_album": None,
         "staged_files": 0,
