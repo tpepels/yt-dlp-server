@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>yt-dlp music server</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <style>
     :root { color-scheme: dark; --bg:#111315; --panel:#191c1f; --panel2:#22262a; --text:#f4f5f5; --muted:#9ca4aa; --line:#30363b; --good:#6fdc8c; --bad:#ff7b72; --wait:#d4b45f; }
     * { box-sizing:border-box; }
@@ -39,9 +40,8 @@
     .jobs { display:grid; gap:10px; }
     .job { min-width:0; max-width:100%; overflow:hidden; background:var(--panel2); border:1px solid var(--line); border-radius:11px; padding:13px 14px; }
     .job-top { min-width:0; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; align-items:start; }
-    .job-release { min-width:0; display:grid; grid-template-columns:auto minmax(0,1fr); gap:10px; align-items:center; }
+    .job-release { min-width:0; display:flex; gap:10px; align-items:center; }
     .job-cover { width:54px; height:54px; border-radius:7px; object-fit:contain; background:#0e1012; border:1px solid var(--line); }
-    .job-cover-placeholder { width:54px; height:54px; border-radius:7px; background:#171a1d; border:1px solid var(--line); display:grid; place-items:center; color:#5f666c; font-size:18px; }
     .job-identity { min-width:0; }
     .job-title { display:block; min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#eef1f3; font-weight:650; text-decoration:none; }
     .job-title:hover { text-decoration:underline; }
@@ -78,7 +78,7 @@
     details { min-width:0; max-width:100%; margin-top:9px; color:var(--muted); } summary { cursor:pointer; }
     pre { width:100%; min-width:0; max-width:100%; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; margin:8px 0 0; padding:10px; background:#0e1012; border-radius:8px; color:#b7bec4; font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; max-height:260px; overflow:auto; }
     .empty { color:var(--muted); padding:8px 0; }
-    @media (max-width:620px) { main{width:calc(100% - 20px);margin-top:16px}.panel{padding:14px}.url-row{grid-template-columns:minmax(0,1fr)}button{min-height:44px}.section-head{display:block}.versions{margin-bottom:10px}.track-progress-head{display:grid;grid-template-columns:1fr}.source-chip{white-space:normal}.resolver-row,.metadata-grid{grid-template-columns:minmax(0,1fr)}.job-cover,.job-cover-placeholder{width:46px;height:46px}.job-top{gap:8px} }
+    @media (max-width:620px) { main{width:calc(100% - 20px);margin-top:16px}.panel{padding:14px}.url-row{grid-template-columns:minmax(0,1fr)}button{min-height:44px}.section-head{display:block}.versions{margin-bottom:10px}.track-progress-head{display:grid;grid-template-columns:1fr}.source-chip{white-space:normal}.resolver-row,.metadata-grid{grid-template-columns:minmax(0,1fr)}.job-cover{width:46px;height:46px}.job-top{gap:8px} }
   </style>
 </head>
 <body>
@@ -145,12 +145,6 @@
 
   function renderJobs(jobs) {
     const root = document.getElementById("jobs");
-    const retriedParents = new Set(jobs.map((job) => job.retry_of).filter(Boolean));
-    const activeResolutions = new Set(
-      jobs
-        .filter((job) => job.resolution_of && (job.status === "queued" || job.status === "running"))
-        .map((job) => job.resolution_of + "|" + job.spotify_track_url)
-    );
     const openLogs = new Set(
       Array.from(root.querySelectorAll(".job details[open]"))
         .map((details) => details.closest(".job")?.dataset.jobId)
@@ -181,12 +175,6 @@
         cover.alt = "";
         cover.loading = "lazy";
         cover.referrerPolicy = "no-referrer";
-        release.appendChild(cover);
-      } else {
-        const cover = document.createElement("div");
-        cover.className = "job-cover-placeholder";
-        cover.textContent = "♪";
-        cover.setAttribute("aria-hidden", "true");
         release.appendChild(cover);
       }
 
@@ -236,7 +224,7 @@
       if (job.progress) bits.push(job.progress);
       if (job.source === "spotify") bits.push("Spotify / spotDL");
       else if (job.playlist) bits.push("playlist");
-      if (job.attempt > 1) bits.push("attempt " + job.attempt);
+      if (job.attempt_count > 1) bits.push("attempt " + job.attempt + " of " + job.attempt_count);
       if (job.final_dir) bits.push(job.final_dir);
       meta.textContent = bits.filter(Boolean).join(" · ");
       card.appendChild(meta);
@@ -444,8 +432,8 @@
           resolve.type = "button";
           resolve.textContent = "Resolve track";
 
-          const activeKey = job.id + "|" + missing.spotify_url;
-          if (activeResolutions.has(activeKey)) {
+          const activeResolutionTracks = new Set(job.active_resolution_tracks || []);
+          if (activeResolutionTracks.has(missing.spotify_url)) {
             input.disabled = true;
             resolve.disabled = true;
             resolve.textContent = "Resolving…";
@@ -499,7 +487,7 @@
         if (missingWrap.childElementCount) card.appendChild(missingWrap);
       }
 
-      if (job.status === "failed" && !retriedParents.has(job.id)) {
+      if (job.status === "failed") {
         const actions = document.createElement("div");
         actions.className = "job-actions";
 
@@ -583,7 +571,11 @@
         card.appendChild(removeActions);
       }
 
-      if ((job.files && job.files.length) || (job.log && job.log.length)) {
+      if (
+        (job.files && job.files.length) ||
+        (job.log && job.log.length) ||
+        (job.attempt_history && job.attempt_history.length > 1)
+      ) {
         const details = document.createElement("details");
         details.open = openLogs.has(job.id);
         const summary = document.createElement("summary");
@@ -591,6 +583,16 @@
         details.appendChild(summary);
         const pre = document.createElement("pre");
         const lines = [];
+        if (job.attempt_history && job.attempt_history.length > 1) {
+          lines.push("Attempts:");
+          for (const item of job.attempt_history) {
+            lines.push(
+              "  #" + item.attempt + " " + item.status +
+              (item.message ? " - " + item.message : "")
+            );
+          }
+          lines.push("");
+        }
         if (job.files && job.files.length) {
           lines.push("Saved:");
           for (const file of job.files) lines.push("  " + file);
