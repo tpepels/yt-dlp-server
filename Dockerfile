@@ -43,6 +43,7 @@ RUN rm -rf "$HOME" "$XDG_CACHE_HOME" "$DENO_DIR" \
 COPY app.py staging.py ./
 COPY tools ./tools
 COPY templates ./templates
+COPY static ./static
 
 EXPOSE 4545
 

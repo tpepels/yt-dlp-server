@@ -68,6 +68,10 @@ jobs:
               ]
           }) == "https://example.invalid/large.jpg"
 
+          assert app.best_thumbnail_url({
+              "entries": [{"id": "VIMmyFY13Uk"}]
+          }) == "https://i.ytimg.com/vi/VIMmyFY13Uk/hqdefault.jpg"
+
           raw = {
               "id": "card1",
               "url": "https://example.invalid/album",
@@ -86,6 +90,61 @@ jobs:
           assert public["source_title"] == "Visible Album", public
           assert public["source_album_artist"] == "Visible Artist", public
           assert public["source_thumbnail"] == "https://example.invalid/art.jpg", public
+
+          # Retries and manual resolution children are one logical request.
+          app.jobs.clear()
+          parent = app.normalize_persisted_job({
+              "id": "root1",
+              "url": "https://example.invalid/album",
+              "status": "failed",
+              "source": "spotify",
+              "playlist": False,
+              "attempt": 1,
+              "source_title": "One Album",
+              "source_thumbnail": "https://example.invalid/one.jpg",
+              "missing_tracks": [{
+                  "spotify_url": "https://open.spotify.com/track/abc123",
+                  "label": "Missing Track",
+                  "resolved": False,
+                  "source_url": None,
+              }],
+          })
+          retry = app.normalize_persisted_job({
+              "id": "retry1",
+              "url": "https://example.invalid/album",
+              "status": "failed",
+              "source": "spotify",
+              "playlist": False,
+              "attempt": 2,
+              "retry_of": "root1",
+              "message": "Latest retry failed",
+          })
+          resolution = app.normalize_persisted_job({
+              "id": "resolution1",
+              "url": "https://open.spotify.com/track/abc123",
+              "status": "running",
+              "source": "spotify",
+              "playlist": False,
+              "resolution_of": "root1",
+              "spotify_track_url": "https://open.spotify.com/track/abc123",
+          })
+          app.jobs.update({
+              parent["id"]: parent,
+              retry["id"]: retry,
+              resolution["id"]: resolution,
+          })
+          grouped = app.public_jobs()
+          assert len(grouped) == 1, grouped
+          card = grouped[0]
+          assert card["id"] == "retry1", card
+          assert card["request_id"] == "root1", card
+          assert card["attempt_count"] == 2, card
+          assert len(card["request_member_ids"]) == 3, card
+          assert card["source_title"] == "One Album", card
+          assert card["source_thumbnail"] == "https://example.invalid/one.jpg", card
+          assert card["active_resolution_tracks"] == [
+              "https://open.spotify.com/track/abc123"
+          ], card
 
           # Existing Spotify jobs are backfilled asynchronously from oEmbed.
           app.jobs.clear()
@@ -153,6 +212,11 @@ jobs:
           grep -q 'job.source_album_artist' templates/index.html
           grep -q 'Open source' templates/index.html
           grep -q 'target = "_blank"' templates/index.html
+          grep -q 'attempt_history' templates/index.html
+          grep -q 'active_resolution_tracks' templates/index.html
+          grep -q 'rel="icon"' templates/index.html
+          test -s static/favicon.svg
+          grep -q 'COPY static ./static' Dockerfile
       - name: Validate staged metadata gate
         run: |
           docker run --rm --user 1000:1000 \
@@ -358,6 +422,34 @@ jobs:
           assert response.status_code == 200, response.data
           assert "failed1" not in app.jobs
           assert not stage.exists(), "discard should clean unpublished staging"
+
+          # Removing the visible retry card removes the whole logical request,
+          # not just the latest attempt (which would make its parent reappear).
+          app.jobs.clear()
+          parent = app.normalize_persisted_job({
+              "id": "parent1",
+              "url": "https://example.invalid/grouped",
+              "status": "failed",
+              "source": "yt-dlp",
+              "staging_owner_id": "parent1",
+          })
+          retry = app.normalize_persisted_job({
+              "id": "retry2",
+              "url": "https://example.invalid/grouped",
+              "status": "failed",
+              "source": "yt-dlp",
+              "retry_of": "parent1",
+              "attempt": 2,
+              "staging_owner_id": "parent1",
+          })
+          app.jobs.update({parent["id"]: parent, retry["id"]: retry})
+          grouped_stage = staging.ensure_stage_dir(app.TEMP_DIR, parent)
+          (grouped_stage / "partial.opus").write_bytes(b"partial")
+          response = client.delete("/api/jobs/retry2")
+          assert response.status_code == 200, response.data
+          assert not app.jobs, app.jobs
+          assert not grouped_stage.exists()
+          assert response.get_json()["removed_count"] == 2, response.data
 
           final_file = root / "library" / "published.opus"
           final_file.parent.mkdir(parents=True)

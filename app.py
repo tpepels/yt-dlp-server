@@ -590,6 +590,29 @@ def best_thumbnail_url(info):
             candidate = str(item.get("url") or "").strip()
             if candidate.startswith(("http://", "https://")):
                 return candidate
+
+    # Playlist-level YouTube metadata often has no thumbnail even though every
+    # track does. Use the first available track thumbnail for the queue card.
+    entries = info.get("entries") or []
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            candidate = str(entry.get("thumbnail") or "").strip()
+            if candidate.startswith(("http://", "https://")):
+                return candidate
+            child_thumbnails = entry.get("thumbnails") or []
+            if isinstance(child_thumbnails, list):
+                for item in reversed(child_thumbnails):
+                    if not isinstance(item, dict):
+                        continue
+                    candidate = str(item.get("url") or "").strip()
+                    if candidate.startswith(("http://", "https://")):
+                        return candidate
+
+            video_id = str(entry.get("id") or "").strip()
+            if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
     return None
 
 
@@ -662,6 +685,26 @@ def probe_url(url):
     result = classify_probe_info(info, url=url)
     cache_probe_result(url, result)
     return result
+
+
+def probe_ytdlp_display(url):
+    completed = subprocess.run(
+        build_probe_command(url, full_playlist=False),
+        capture_output=True,
+        text=True,
+        timeout=PROBE_TIMEOUT,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("Could not refresh source preview metadata.")
+    try:
+        info = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("yt-dlp returned invalid preview metadata") from exc
+    return {
+        "title": info.get("title") or info.get("fulltitle") or "",
+        "thumbnail": best_thumbnail_url(info),
+    }
 
 
 def probe_spotify_url(url):
@@ -1085,25 +1128,42 @@ def run_job(job_id):
 def backfill_job_display_metadata():
     with jobs_lock:
         candidates = [
-            (job["id"], job["url"])
+            (
+                job["id"],
+                job["url"],
+                job.get("source", "yt-dlp"),
+                not bool(job.get("source_title")),
+                not bool(job.get("source_thumbnail")),
+            )
             for job in jobs.values()
-            if job.get("source") == "spotify"
-            and not job.get("source_title")
+            if not job.get("source_title") or not job.get("source_thumbnail")
         ]
 
     changed = False
-    for job_id, url in candidates:
-        result = probe_spotify_url(url)
+    for job_id, url, source, needs_title, needs_thumbnail in candidates:
+        try:
+            result = (
+                probe_spotify_url(url)
+                if source == "spotify"
+                else probe_ytdlp_display(url)
+            )
+        except (subprocess.TimeoutExpired, RuntimeError):
+            continue
+
         with jobs_lock:
             job = jobs.get(job_id)
             if not job:
                 continue
             title = result.get("title")
             thumbnail = result.get("thumbnail")
-            if title and title != f"Spotify {spotify_link_type(url)}":
+            if (
+                needs_title
+                and title
+                and title != f"Spotify {spotify_link_type(url)}"
+            ):
                 job["source_title"] = title
                 changed = True
-            if thumbnail:
+            if needs_thumbnail and thumbnail:
                 job["source_thumbnail"] = thumbnail
                 changed = True
 
@@ -1153,53 +1213,145 @@ threading.Thread(
 ).start()
 
 
+def request_root_id_locked(job):
+    current = job
+    seen = set()
+    while current and current.get("id") not in seen:
+        seen.add(current.get("id"))
+        parent_id = current.get("retry_of") or current.get("resolution_of")
+        if not parent_id:
+            return current.get("id")
+        parent = jobs.get(parent_id)
+        if parent is None:
+            return current.get("id")
+        current = parent
+    return job.get("id")
+
+
+def request_members_locked(root_id):
+    return [
+        job for job in jobs.values()
+        if request_root_id_locked(job) == root_id
+    ]
+
+
+def request_representative_locked(members):
+    primary = [job for job in members if not job.get("resolution_of")]
+    pool = primary or members
+    return max(
+        pool,
+        key=lambda item: (
+            item.get("attempt", 1),
+            item.get("created_at", 0),
+        ),
+    )
+
+
+def public_job_from_group_locked(root_id, members):
+    representative = request_representative_locked(members)
+    primary = sorted(
+        [job for job in members if not job.get("resolution_of")],
+        key=lambda item: (item.get("attempt", 1), item.get("created_at", 0)),
+    )
+    if not primary:
+        primary = [representative]
+
+    # Prefer the most recently known display metadata anywhere in the request
+    # chain so a retry does not lose the useful title/cover from its parent.
+    display_order = sorted(
+        members,
+        key=lambda item: item.get("created_at", 0),
+        reverse=True,
+    )
+
+    def first_value(key):
+        for item in display_order:
+            value = item.get(key)
+            if value:
+                return value
+        return ""
+
+    active_resolutions = [
+        item.get("spotify_track_url")
+        for item in members
+        if item.get("resolution_of")
+        and item.get("status") in {"queued", "running", "finalizing"}
+        and item.get("spotify_track_url")
+    ]
+
+    attempt_history = [
+        {
+            "id": item["id"],
+            "attempt": item.get("attempt", 1),
+            "status": item.get("status"),
+            "message": item.get("message") or "",
+        }
+        for item in reversed(primary)
+    ]
+
+    return {
+        "id": representative["id"],
+        "request_id": root_id,
+        "request_member_ids": [item["id"] for item in members],
+        "attempt_count": len(primary),
+        "attempt_history": attempt_history,
+        "active_resolution_tracks": active_resolutions,
+        "url": representative["url"],
+        "status": representative["status"],
+        "message": representative["message"],
+        "progress": representative["progress"],
+        "playlist": representative["playlist"],
+        "album_mode": representative["album_mode"],
+        "compilation": representative["compilation"],
+        "force": representative["force"],
+        "current_item": representative["current_item"],
+        "total_items": representative["total_items"],
+        "completed_items": representative["completed_items"],
+        "files": list(representative["files"]),
+        "log": list(representative["log"]),
+        "created_at": max(item["created_at"] for item in members),
+        "started_at": representative["started_at"],
+        "finished_at": representative["finished_at"],
+        "returncode": representative["returncode"],
+        "http_403": representative["http_403"],
+        "retry_of": representative["retry_of"],
+        "attempt": representative["attempt"],
+        "source": representative.get("source", "yt-dlp"),
+        "failed_items": representative.get("failed_items", 0),
+        "missing_tracks": [
+            dict(item) for item in representative.get("missing_tracks", [])
+        ],
+        "resolution_of": None,
+        "spotify_track_url": None,
+        "manual_source_url": None,
+        "ignored_items": sum(
+            1 for item in representative.get("missing_tracks", [])
+            if item.get("source") == "youtube" and item.get("ignored")
+        ),
+        "staging_owner_id": representative.get("staging_owner_id"),
+        "source_title": first_value("source_title"),
+        "source_album_artist": first_value("source_album_artist"),
+        "source_thumbnail": first_value("source_thumbnail"),
+        "metadata_artist": first_value("metadata_artist"),
+        "metadata_album": first_value("metadata_album"),
+        "staged_files": representative.get("staged_files", 0),
+        "final_dir": first_value("final_dir"),
+    }
+
+
 def public_jobs():
     with jobs_lock:
-        ordered = sorted(jobs.values(), key=lambda item: item["created_at"], reverse=True)
-        return [
-            {
-                "id": job["id"],
-                "url": job["url"],
-                "status": job["status"],
-                "message": job["message"],
-                "progress": job["progress"],
-                "playlist": job["playlist"],
-                "album_mode": job["album_mode"],
-                "compilation": job["compilation"],
-                "force": job["force"],
-                "current_item": job["current_item"],
-                "total_items": job["total_items"],
-                "completed_items": job["completed_items"],
-                "files": list(job["files"]),
-                "log": list(job["log"]),
-                "created_at": job["created_at"],
-                "started_at": job["started_at"],
-                "finished_at": job["finished_at"],
-                "returncode": job["returncode"],
-                "http_403": job["http_403"],
-                "retry_of": job["retry_of"],
-                "attempt": job["attempt"],
-                "source": job.get("source", "yt-dlp"),
-                "failed_items": job.get("failed_items", 0),
-                "missing_tracks": [dict(item) for item in job.get("missing_tracks", [])],
-                "resolution_of": job.get("resolution_of"),
-                "spotify_track_url": job.get("spotify_track_url"),
-                "manual_source_url": job.get("manual_source_url"),
-                "ignored_items": sum(
-                    1 for item in job.get("missing_tracks", [])
-                    if item.get("source") == "youtube" and item.get("ignored")
-                ),
-                "staging_owner_id": job.get("staging_owner_id"),
-                "source_title": job.get("source_title") or "",
-                "source_album_artist": job.get("source_album_artist") or "",
-                "source_thumbnail": job.get("source_thumbnail") or "",
-                "metadata_artist": job.get("metadata_artist") or "",
-                "metadata_album": job.get("metadata_album") or "",
-                "staged_files": job.get("staged_files", 0),
-                "final_dir": job.get("final_dir"),
-            }
-            for job in ordered
+        groups = {}
+        for job in jobs.values():
+            root_id = request_root_id_locked(job)
+            groups.setdefault(root_id, []).append(job)
+
+        public = [
+            public_job_from_group_locked(root_id, members)
+            for root_id, members in groups.items()
         ]
+        public.sort(key=lambda item: item["created_at"], reverse=True)
+        return public
 
 
 @app.get("/")
@@ -1345,48 +1497,60 @@ def remove_job(job_id):
         job = jobs.get(job_id)
         if job is None:
             return jsonify({"ok": False, "error": "Job not found."}), 404
-        if job.get("status") not in removable_statuses:
+
+        root_id = request_root_id_locked(job)
+        members = request_members_locked(root_id)
+        representative = request_representative_locked(members)
+
+        if representative.get("status") not in removable_statuses:
             return jsonify({
                 "ok": False,
-                "error": "Only finished, failed, or metadata-waiting jobs can be removed.",
+                "error": "Only finished, failed, or metadata-waiting requests can be removed.",
             }), 409
 
-        owner_id = library_staging.staging_owner_id(job)
-        active_related = [
-            other
-            for other in jobs.values()
-            if other.get("id") != job_id
-            and (
-                other.get("retry_of") == job_id
-                or other.get("resolution_of") == job_id
-                or library_staging.staging_owner_id(other) == owner_id
-            )
-            and other.get("status") in {"queued", "running", "finalizing"}
+        active = [
+            item for item in members
+            if item.get("status") in {"queued", "running", "finalizing"}
         ]
-        if active_related:
+        if active:
             return jsonify({
                 "ok": False,
-                "error": "A retry or resolution for this job is still active.",
+                "error": "This request still has active work.",
             }), 409
 
-        shared_stage = any(
-            other.get("id") != job_id
-            and library_staging.staging_owner_id(other) == owner_id
-            for other in jobs.values()
-        )
-        discard_staging = job.get("status") != "succeeded" and not shared_stage
+        owner_ids = {
+            library_staging.staging_owner_id(item)
+            for item in members
+            if library_staging.staging_owner_id(item)
+        }
+        member_ids = {item["id"] for item in members}
+        destructive = representative.get("status") != "succeeded"
 
-        jobs.pop(job_id, None)
+        for member_id in member_ids:
+            jobs.pop(member_id, None)
+
+        remaining_owner_ids = {
+            library_staging.staging_owner_id(item)
+            for item in jobs.values()
+        }
+        discard_owner_ids = (
+            owner_ids - remaining_owner_ids
+            if destructive
+            else set()
+        )
         persist_jobs_locked()
 
-    discarded_path = None
-    if discard_staging:
-        discarded_path = str(library_staging.discard_stage(TEMP_DIR, job))
+    for owner_id in discard_owner_ids:
+        library_staging.discard_stage(
+            TEMP_DIR,
+            {"id": owner_id, "staging_owner_id": owner_id},
+        )
 
     return jsonify({
         "ok": True,
-        "removed": job_id,
-        "discarded_staging": bool(discarded_path),
+        "removed": sorted(member_ids),
+        "removed_count": len(member_ids),
+        "discarded_staging": bool(discard_owner_ids),
     }), 200
 
 
