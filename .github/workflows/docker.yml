@@ -60,6 +60,8 @@ jobs:
           grep -q 'Ignore permanently' templates/index.html
           grep -q 'Metadata required before library import' templates/index.html
           grep -q 'Move to library' templates/index.html
+          grep -q 'Discard' templates/index.html
+          grep -q 'Remove from list' templates/index.html
           grep -q 'Staging first:' templates/index.html
           grep -q 'JOB_REFRESH_MS = 5000' templates/index.html
           grep -q "Hint: this doesn't look like an album" templates/index.html
@@ -197,6 +199,102 @@ jobs:
           tags = json.loads(probe.stdout)["format"]["tags"]
           assert tags["album"] == "Correct Album", tags
           assert tags["artist"] == "Correct Artist", tags
+          PY
+      - name: Validate safe retagging and job discard
+        run: |
+          docker run --rm --user 1000:1000 \
+            -e MUSIC_ROOT=/tmp/music \
+            -e STATE_DIR=/tmp/state \
+            -e TEMP_DIR=/tmp/work \
+            yt-dlp-server:test python - <<'PY'
+          import base64
+          import pathlib
+          import subprocess
+          import tempfile
+
+          from mutagen.flac import Picture
+          from mutagen.oggopus import OggOpus
+
+          import app
+          import staging
+
+          root = pathlib.Path(tempfile.mkdtemp())
+          covered = root / "covered.opus"
+          subprocess.run([
+              "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+              "-f", "lavfi", "-i", "sine=frequency=440:duration=0.1",
+              "-c:a", "libopus", str(covered),
+          ], check=True)
+
+          audio = OggOpus(covered)
+          picture = Picture()
+          picture.type = 3
+          picture.mime = "image/png"
+          picture.desc = "cover"
+          picture.data = b"not-a-real-png-but-valid-picture-metadata"
+          encoded_picture = base64.b64encode(picture.write()).decode("ascii")
+          audio["metadata_block_picture"] = [encoded_picture]
+          audio["title"] = ["Covered track"]
+          audio.save()
+
+          before = OggOpus(covered)["metadata_block_picture"]
+          staging.retag_media(
+              covered,
+              album="Correct Album",
+              album_artist="Correct Artist",
+              track_artist="Track Artist",
+          )
+          after = OggOpus(covered)
+          assert after["album"] == ["Correct Album"], after.tags
+          assert after["albumartist"] == ["Correct Artist"], after.tags
+          assert after["artist"] == ["Track Artist"], after.tags
+          assert after["metadata_block_picture"] == before, (
+              "retagging must preserve embedded cover metadata"
+          )
+
+          # Failed/unfinished jobs can be discarded and their external staging
+          # is cleaned, while completed library files are never deleted.
+          app.JOBS_STATE_FILE = root / "jobs.json"
+          app.TEMP_DIR = root / "tmp"
+          app.jobs.clear()
+
+          failed = {
+              "id": "failed1",
+              "url": "https://example.invalid/album",
+              "status": "failed",
+              "staging_owner_id": "failed1",
+          }
+          app.jobs["failed1"] = failed
+          stage = staging.ensure_stage_dir(app.TEMP_DIR, failed)
+          (stage / "partial.opus").write_bytes(b"partial")
+          client = app.app.test_client()
+          response = client.delete("/api/jobs/failed1")
+          assert response.status_code == 200, response.data
+          assert "failed1" not in app.jobs
+          assert not stage.exists(), "discard should clean unpublished staging"
+
+          final_file = root / "library" / "published.opus"
+          final_file.parent.mkdir(parents=True)
+          final_file.write_bytes(b"published")
+          app.jobs["done1"] = {
+              "id": "done1",
+              "url": "https://example.invalid/done",
+              "status": "succeeded",
+              "staging_owner_id": "done1",
+              "files": [str(final_file)],
+          }
+          response = client.delete("/api/jobs/done1")
+          assert response.status_code == 200, response.data
+          assert final_file.exists(), "removing history must not delete library files"
+
+          app.jobs["queued1"] = {
+              "id": "queued1",
+              "url": "https://example.invalid/queued",
+              "status": "queued",
+              "staging_owner_id": "queued1",
+          }
+          response = client.delete("/api/jobs/queued1")
+          assert response.status_code == 409, response.data
           PY
       - name: Validate legacy repair metadata inference
         run: |
