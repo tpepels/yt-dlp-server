@@ -16,7 +16,9 @@ import os
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -42,15 +44,65 @@ def under(path, root):
         return False
 
 
+def is_single_video_url(url):
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower()
+    if host not in {
+        "youtube.com", "www.youtube.com", "m.youtube.com",
+        "music.youtube.com", "youtu.be",
+    }:
+        return False
+    if host == "youtu.be":
+        return True
+    return parsed.path == "/watch" and not parse_qs(parsed.query).get("list")
+
+
+def youtube_probe_args(url):
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return []
+    if host not in {
+        "youtube.com", "www.youtube.com", "m.youtube.com",
+        "music.youtube.com", "youtu.be",
+    }:
+        return []
+
+    args = []
+    player_client = os.getenv("YOUTUBE_PLAYER_CLIENT", "mweb").strip()
+    if player_client:
+        args.extend(["--extractor-args", f"youtube:player_client={player_client}"])
+
+    server_home = Path(
+        os.getenv(
+            "BGUTIL_SERVER_HOME",
+            "/opt/bgutil-ytdlp-pot-provider/server",
+        )
+    )
+    if server_home.is_dir():
+        args.extend([
+            "--extractor-args",
+            f"youtubepot-bgutilscript:server_home={server_home}",
+        ])
+    return args
+
+
 def probe_source(url, is_playlist):
     command = [
         "yt-dlp",
         "--dump-single-json",
         "--skip-download",
         "--no-warnings",
+        "--ignore-errors",
     ]
+    command.extend(youtube_probe_args(url))
     if is_playlist:
-        command.extend(["--flat-playlist", "--yes-playlist"])
+        # Deliberately do NOT use --flat-playlist here. Legacy repair needs
+        # each track's music metadata, which flat playlist extraction omits.
+        command.append("--yes-playlist")
     else:
         command.append("--no-playlist")
     command.append(url)
@@ -61,56 +113,136 @@ def probe_source(url, is_playlist):
         text=True,
         check=False,
     )
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        raise RuntimeError(detail or f"yt-dlp exited {completed.returncode}")
-    try:
-        return json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("yt-dlp returned invalid metadata JSON") from exc
+
+    output = (completed.stdout or "").strip()
+    if output:
+        try:
+            info = json.loads(output)
+        except json.JSONDecodeError as exc:
+            detail = (completed.stderr or "").strip()
+            raise RuntimeError(
+                detail or "yt-dlp returned invalid metadata JSON"
+            ) from exc
+        if isinstance(info, dict):
+            return info
+
+    detail = (completed.stderr or completed.stdout or "").strip()
+    raise RuntimeError(detail or f"yt-dlp exited {completed.returncode}")
+
+
+def topic_artist(info):
+    for key in ("uploader", "channel"):
+        raw = str(info.get(key) or "").strip()
+        if raw.lower().endswith(" - topic"):
+            return staging.clean_artist_name(raw)
+    return ""
+
+
+def unique_consensus(values):
+    cleaned = [value for value in values if value]
+    unique = staging.unique_values(cleaned)
+    if len(unique) == 1:
+        return unique[0], len(cleaned)
+    return "", 0
+
+
+def majority_value(values):
+    cleaned = [value for value in values if value]
+    if not cleaned:
+        return "", 0
+    value, count = Counter(cleaned).most_common(1)[0]
+    if count > len(cleaned) / 2:
+        return value, count
+    return "", 0
 
 
 def collection_metadata(info, is_playlist):
-    if is_playlist:
-        album = staging.clean_album_name(
-            info.get("title")
-            or info.get("playlist_title")
-            or info.get("playlist")
-        )
-    else:
-        album = staging.clean_album_name(info.get("album"))
-
     entries = [
         entry for entry in (info.get("entries") or [])
-        if isinstance(entry, dict)
+        if isinstance(entry, dict) and entry.get("id")
     ]
+
+    if not entries and not is_playlist and info.get("id"):
+        entries = [info]
+
     per_track = {
         str(entry.get("id")): staging.trustworthy_track_artist(entry)
         for entry in entries
         if entry.get("id")
     }
 
-    top_artist = staging.clean_artist_name(
-        info.get("album_artist") or info.get("artist")
+    explicit_albums = [
+        staging.clean_album_name(entry.get("album"))
+        for entry in entries
+    ]
+    album, album_count = unique_consensus(explicit_albums)
+    album_evidence = (
+        f"track album metadata ({album_count}/{len(entries)})"
+        if album else ""
     )
-    if not top_artist:
-        for key in ("uploader", "channel"):
-            raw = str(info.get(key) or "").strip()
-            if raw.lower().endswith(" - topic"):
-                top_artist = staging.clean_artist_name(raw)
-                break
+    if not album:
+        album, album_count = majority_value(explicit_albums)
+        if album:
+            album_evidence = (
+                f"majority track album metadata ({album_count}/{len(entries)})"
+            )
 
-    artists = staging.unique_values(per_track.values())
-    if top_artist:
-        album_artist = top_artist
-    elif len(artists) == 1:
-        album_artist = artists[0]
-    elif len(artists) > 1:
-        album_artist = "Various Artists"
-    else:
-        album_artist = ""
+    if not album and is_playlist:
+        album = staging.clean_album_name(
+            info.get("title")
+            or info.get("playlist_title")
+            or info.get("playlist")
+        )
+        if not album:
+            album = staging.most_common(
+                staging.clean_album_name(
+                    entry.get("playlist_title")
+                    or entry.get("playlist")
+                )
+                for entry in entries
+            )
+        if album:
+            album_evidence = "playlist title"
+    elif not album:
+        album = staging.clean_album_name(info.get("album"))
+        if album:
+            album_evidence = "track album metadata"
 
-    return album_artist, album, per_track
+    explicit_album_artists = [
+        staging.clean_artist_name(entry.get("album_artist"))
+        for entry in entries
+    ]
+    album_artist, artist_count = unique_consensus(explicit_album_artists)
+    artist_evidence = (
+        f"album_artist metadata ({artist_count}/{len(entries)})"
+        if album_artist else ""
+    )
+
+    if not album_artist:
+        topic_artists = [topic_artist(entry) for entry in entries]
+        album_artist, artist_count = unique_consensus(topic_artists)
+        if album_artist:
+            artist_evidence = (
+                f"stable Artist - Topic channel ({artist_count}/{len(entries)})"
+            )
+
+    if not album_artist:
+        track_artists = [
+            staging.clean_artist_name(entry.get("artist"))
+            for entry in entries
+        ]
+        album_artist, artist_count = unique_consensus(track_artists)
+        if album_artist:
+            artist_evidence = (
+                f"consistent track artist metadata ({artist_count}/{len(entries)})"
+            )
+
+    evidence = {
+        "tracks": len(entries),
+        "artist": artist_evidence,
+        "album": album_evidence,
+    }
+    return album_artist, album, per_track, evidence
 
 
 def collect_groups(jobs, import_root, only_url=None):
@@ -260,6 +392,14 @@ def main():
         action="store_true",
         help="Actually retag/move files. Without this flag, only print the plan.",
     )
+    parser.add_argument(
+        "--include-singles",
+        action="store_true",
+        help=(
+            "Also repair legacy single-video jobs. By default the repair is "
+            "album-only and leaves standalone watch URLs untouched."
+        ),
+    )
     args = parser.parse_args()
 
     import_root = Path(args.music_root) / args.import_subdir.strip("/\\")
@@ -271,6 +411,7 @@ def main():
         return 0
 
     unresolved = 0
+    skipped_singles = 0
     planned = 0
     changed = 0
 
@@ -283,26 +424,45 @@ def main():
             f"recorded attempt(s) ({kind})"
         )
 
+        if is_single_video_url(url) and not args.include_singles:
+            print(
+                "  SKIPPED: standalone video URL - legacy repair is album-only "
+                "(use --include-singles to include it)"
+            )
+            skipped_singles += 1
+            continue
+
+        actual_playlist = not is_single_video_url(url) and group["playlist"]
+
         try:
-            info = probe_source(url, group["playlist"])
-            album_artist, album, per_track = collection_metadata(
-                info, group["playlist"]
+            info = probe_source(url, actual_playlist)
+            album_artist, album, per_track, evidence = collection_metadata(
+                info, actual_playlist
             )
         except Exception as exc:
             print(f"  UNRESOLVED: metadata probe failed: {exc}")
             unresolved += 1
             continue
 
+        if evidence["tracks"]:
+            print(f"  full metadata: {evidence['tracks']} track(s) inspected")
+
         if not album_artist or not album:
             print(
                 "  UNRESOLVED: could not derive both album artist and album "
                 f"(artist={album_artist!r}, album={album!r})"
             )
+            if evidence["artist"]:
+                print(f"    artist evidence: {evidence['artist']}")
+            if evidence["album"]:
+                print(f"    album evidence: {evidence['album']}")
             unresolved += 1
             continue
 
         target = import_root / album_artist / album
         print(f"  target: {target}")
+        print(f"    artist evidence: {evidence['artist']}")
+        print(f"    album evidence: {evidence['album']}")
         source_dirs = sorted({str(path.parent) for path in paths})
         for directory in source_dirs[:8]:
             print(f"    from: {directory}")
@@ -333,7 +493,8 @@ def main():
     print("\nSummary")
     print(f"  files planned: {planned}")
     print(f"  files repaired: {changed}")
-    print(f"  unresolved collections: {unresolved}")
+    print(f"  unresolved albums: {unresolved}")
+    print(f"  standalone video jobs skipped: {skipped_singles}")
     if not args.apply:
         print("  DRY RUN ONLY - rerun with --apply to make these changes")
 
