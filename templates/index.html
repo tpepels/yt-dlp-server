@@ -11,8 +11,12 @@
     html, body { max-width:100%; overflow-x:hidden; }
     body { margin:0; font:15px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }
     main { width:min(920px,calc(100% - 32px)); max-width:100%; margin:48px auto; }
+    .page-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:28px; }
+    .page-title { min-width:0; }
     h1 { margin:0 0 6px; font-size:30px; letter-spacing:-.03em; }
-    .sub { color:var(--muted); margin:0 0 28px; }
+    .sub { color:var(--muted); margin:0; }
+    .extension-download { flex:0 0 auto; display:inline-flex; align-items:center; min-height:38px; padding:0 13px; border:1px solid #41474d; border-radius:9px; background:#252a2e; color:#e7eaec; font-size:12px; font-weight:650; text-decoration:none; }
+    .extension-download:hover { background:#30363b; }
     .panel { min-width:0; max-width:100%; background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; margin-bottom:18px; }
     form { display:grid; gap:14px; }
     .url-row { display:grid; grid-template-columns:1fr auto; gap:10px; }
@@ -78,13 +82,20 @@
     details { min-width:0; max-width:100%; margin-top:9px; color:var(--muted); } summary { cursor:pointer; }
     pre { width:100%; min-width:0; max-width:100%; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; margin:8px 0 0; padding:10px; background:#0e1012; border-radius:8px; color:#b7bec4; font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; max-height:260px; overflow:auto; }
     .empty { color:var(--muted); padding:8px 0; }
-    @media (max-width:620px) { main{width:calc(100% - 20px);margin-top:16px}.panel{padding:14px}.url-row{grid-template-columns:minmax(0,1fr)}button{min-height:44px}.section-head{display:block}.versions{margin-bottom:10px}.track-progress-head{display:grid;grid-template-columns:1fr}.source-chip{white-space:normal}.resolver-row,.metadata-grid{grid-template-columns:minmax(0,1fr)}.job-cover{width:46px;height:46px}.job-top{gap:8px} }
+    @media (max-width:620px) { main{width:calc(100% - 20px);margin-top:16px}.page-head{display:block;margin-bottom:20px}.extension-download{margin-top:12px}.panel{padding:14px}.url-row{grid-template-columns:minmax(0,1fr)}button{min-height:44px}.section-head{display:block}.versions{margin-bottom:10px}.track-progress-head{display:grid;grid-template-columns:1fr}.source-chip{white-space:normal}.resolver-row,.metadata-grid{grid-template-columns:minmax(0,1fr)}.job-cover{width:46px;height:46px}.job-top{gap:8px} }
   </style>
 </head>
 <body>
 <main>
-  <h1>yt-dlp music server</h1>
-  <p class="sub">Audio only. Metadata and cover art embedded when the source provides them.</p>
+  <div class="page-head">
+    <div class="page-title">
+      <h1>yt-dlp music server</h1>
+      <p class="sub">Audio only. Metadata and cover art embedded when the source provides them.</p>
+    </div>
+    <a class="extension-download" href="{{ url_for('download_chrome_extension') }}" download>
+      Chrome extension
+    </a>
+  </div>
   <section class="panel">
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
     <form id="download-form" action="/download" method="post">
