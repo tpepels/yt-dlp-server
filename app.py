@@ -7,7 +7,8 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import Request, urlopen
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
@@ -663,6 +664,45 @@ def probe_url(url):
     return result
 
 
+def probe_spotify_url(url):
+    cached = get_cached_probe_result(url)
+    if cached:
+        return cached
+
+    spotify_type = spotify_link_type(url)
+    result = {
+        "kind": "spotify",
+        "title": f"Spotify {spotify_type}",
+        "count": None,
+        "extractor": "Spotify oEmbed",
+        "album_mode": spotify_type == "album",
+        "album_artist": None,
+        "thumbnail": None,
+    }
+
+    endpoint = "https://open.spotify.com/oembed?" + urlencode({"url": url})
+    try:
+        request_obj = Request(
+            endpoint,
+            headers={"User-Agent": "yt-dlp-server/1.0"},
+        )
+        with urlopen(request_obj, timeout=min(PROBE_TIMEOUT, 10)) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        title = str(payload.get("title") or "").strip()
+        thumbnail = str(payload.get("thumbnail_url") or "").strip()
+        if title:
+            result["title"] = title
+        if thumbnail.startswith(("http://", "https://")):
+            result["thumbnail"] = thumbnail
+    except Exception:
+        # oEmbed is a display enhancement only. Spotify downloads must not fail
+        # merely because the preview service is unavailable.
+        pass
+
+    cache_probe_result(url, result)
+    return result
+
+
 def build_spotdl_command(job):
     cmd = [
         "spotdl",
@@ -1152,10 +1192,14 @@ def download():
 
     source = "spotify" if is_spotify_url(url) else "yt-dlp"
     playlist_requested = request.form.get("playlist") == "on" if source == "yt-dlp" else False
-    probe_result = get_cached_probe_result(url) if source == "yt-dlp" else None
-    if source == "yt-dlp" and probe_result is None:
+    probe_result = get_cached_probe_result(url)
+    if probe_result is None:
         try:
-            probe_result = probe_url(url)
+            probe_result = (
+                probe_spotify_url(url)
+                if source == "spotify"
+                else probe_url(url)
+            )
         except (subprocess.TimeoutExpired, RuntimeError):
             probe_result = None
 
@@ -1589,16 +1633,11 @@ def api_probe():
         return jsonify({"ok": False, "error": error}), 400
 
     if is_spotify_url(url):
-        spotify_type = spotify_link_type(url)
+        result = probe_spotify_url(url)
         return jsonify({
             "ok": True,
-            "kind": "spotify",
-            "title": f"Spotify {spotify_type}",
-            "count": None,
-            "extractor": "spotDL",
-            "album_mode": spotify_type == "album",
-            "is_album": spotify_type == "album",
-            "album_artist": None,
+            **result,
+            "is_album": bool(result.get("album_mode")),
         })
 
     try:
