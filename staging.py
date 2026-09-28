@@ -171,7 +171,7 @@ def analyze_ytdlp(stage, job):
     ]
     explicit_albums = [clean_album_name(info.get("album")) for info in infos]
 
-    if job.get("playlist"):
+    if job.get("collection_mode", job.get("playlist")):
         album = (
             clean_album_name(job.get("source_title"))
             or most_common(playlist_titles)
