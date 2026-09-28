@@ -1,5 +1,12 @@
 # Chrome extension
 
+## Download packaged ZIP
+
+[Download v1.0.0](https://github.com/tpepels/yt-dlp-server/raw/refs/heads/main/dist/yt-dlp-server-chrome-extension-v1.0.0.zip)
+
+Unzip it before using **Load unpacked** in Chrome.
+
+
 Manifest V3 Chrome/Chromium extension for sending album URLs directly to the yt-dlp server.
 
 ## Install
