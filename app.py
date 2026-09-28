@@ -4,6 +4,7 @@ import queue
 import re
 import subprocess
 import threading
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -25,6 +26,7 @@ COOKIES_FILE = os.getenv("COOKIES_FILE", "").strip()
 MAX_QUEUE = int(os.getenv("MAX_QUEUE", "50"))
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "50"))
 PROBE_TIMEOUT = int(os.getenv("PROBE_TIMEOUT", "30"))
+FALLBACK_TRACK_TIMEOUT = int(os.getenv("FALLBACK_TRACK_TIMEOUT", "600"))
 BGUTIL_SERVER_HOME = Path(os.getenv("BGUTIL_SERVER_HOME", "/opt/bgutil-ytdlp-pot-provider/server"))
 YOUTUBE_PLAYER_CLIENT = os.getenv("YOUTUBE_PLAYER_CLIENT", "mweb").strip() or "mweb"
 
@@ -745,6 +747,77 @@ def probe_spotify_url(url):
 
     cache_probe_result(url, result)
     return result
+
+
+def normalize_fallback_text(value):
+    value = str(value or "").casefold().strip()
+    value = re.sub(r"[^\w]+", " ", value, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def first_tag_value(tags, *names):
+    if not tags:
+        return ""
+    for name in names:
+        value = tags.get(name)
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else ""
+        value = str(value or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def validate_fallback_metadata(path, artist, title):
+    try:
+        audio = library_staging.MutagenFile(path, easy=True)
+    except Exception:
+        audio = None
+    if audio is None or not getattr(audio, "tags", None):
+        return False, "Downloaded fallback audio has no readable metadata."
+
+    candidate_title = first_tag_value(audio.tags, "title")
+    candidate_artist = first_tag_value(audio.tags, "artist", "albumartist", "album artist")
+    expected_title = normalize_fallback_text(title)
+    expected_artist = normalize_fallback_text(artist)
+
+    if not candidate_title or normalize_fallback_text(candidate_title) != expected_title:
+        return False, f"Fallback title mismatch: {candidate_title or 'unknown'}"
+    if not candidate_artist or expected_artist not in normalize_fallback_text(candidate_artist):
+        return False, f"Fallback artist mismatch: {candidate_artist or 'unknown'}"
+    return True, None
+
+
+def build_fallback_track_command(query, output_dir):
+    cmd = [
+        "spotdl",
+        "download",
+        query,
+        "--simple-tui",
+        "--headless",
+        "--log-level",
+        "INFO",
+        "--threads",
+        "1",
+        "--format",
+        "opus",
+        "--bitrate",
+        "disable",
+        "--output",
+        str(Path(output_dir) / "{title}.{output-ext}"),
+        "--overwrite",
+        "force",
+        "--audio",
+        "youtube-music",
+        "youtube",
+        "bandcamp",
+        "soundcloud",
+        "--yt-dlp-args",
+        spotdl_ytdlp_args(),
+    ]
+    if COOKIES_FILE and Path(COOKIES_FILE).is_file():
+        cmd.extend(["--cookie-file", COOKIES_FILE])
+    return cmd
 
 
 def build_spotdl_command(job):
@@ -1838,6 +1911,94 @@ def resolve_missing_spotify_track(job_id):
     return jsonify({"ok": True, "job_id": resolution_id}), 202
 
 
+@app.post("/api/fallback-track")
+def api_fallback_track():
+    payload = request.get_json(silent=True) or {}
+    artist = str(payload.get("artist") or "").strip()
+    title = str(payload.get("title") or "").strip()
+    album = str(payload.get("album") or "").strip()
+
+    if not artist or not title:
+        return jsonify({
+            "ok": False,
+            "error": "artist and title are required for fallback matching.",
+        }), 400
+    if len(artist) > 300 or len(title) > 300 or len(album) > 300:
+        return jsonify({"ok": False, "error": "Fallback metadata is too long."}), 400
+    if VERSIONS.get("spotdl", "unavailable") == "unavailable":
+        return jsonify({"ok": False, "error": "spotDL is unavailable."}), 503
+
+    request_id = uuid.uuid4().hex[:12]
+    work_dir = TEMP_DIR / "fallback" / request_id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    query = f"{artist} - {title}"
+
+    try:
+        completed = subprocess.run(
+            build_fallback_track_command(query, work_dir),
+            capture_output=True,
+            text=True,
+            timeout=FALLBACK_TRACK_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        return jsonify({
+            "ok": False,
+            "error": "spotDL fallback timed out.",
+            "query": query,
+        }), 504
+    except Exception as exc:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        return jsonify({
+            "ok": False,
+            "error": f"Could not start spotDL fallback: {exc}",
+            "query": query,
+        }), 502
+
+    files = library_staging.media_files(work_dir)
+    if completed.returncode != 0 or len(files) != 1:
+        detail = [
+            line.strip()
+            for line in (completed.stdout or "").splitlines()
+            if line.strip()
+        ][-8:]
+        shutil.rmtree(work_dir, ignore_errors=True)
+        return jsonify({
+            "ok": False,
+            "error": (
+                "spotDL fallback did not produce exactly one audio file."
+                if completed.returncode == 0
+                else f"spotDL fallback exited with code {completed.returncode}."
+            ),
+            "query": query,
+            "detail": detail,
+        }), 404 if completed.returncode == 0 else 502
+
+    audio_file = files[0]
+    valid, validation_error = validate_fallback_metadata(audio_file, artist, title)
+    if not valid:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        return jsonify({
+            "ok": False,
+            "error": validation_error or "Fallback metadata did not match.",
+            "query": query,
+        }), 409
+
+    response = send_file(
+        audio_file,
+        as_attachment=False,
+        download_name=audio_file.name,
+        max_age=0,
+    )
+    response.headers["X-Fallback-Provider"] = "spotdl"
+    response.headers["X-Fallback-Query"] = query
+    if album:
+        response.headers["X-Fallback-Album"] = album[:200]
+    response.call_on_close(lambda: shutil.rmtree(work_dir, ignore_errors=True))
+    return response
+
+
 @app.post("/api/probe")
 def api_probe():
     payload = request.get_json(silent=True) or request.form
@@ -1891,6 +2052,11 @@ def health():
             "ignored_tracks": {
                 "path": str(IGNORED_TRACKS_FILE),
                 "count": len(load_ignored_tracks()),
+            },
+            "fallback_track": {
+                "enabled": VERSIONS.get("spotdl", "unavailable") != "unavailable",
+                "endpoint": "/api/fallback-track",
+                "timeout_seconds": FALLBACK_TRACK_TIMEOUT,
             },
             "spotify": {
                 "enabled": VERSIONS.get("spotdl", "unavailable") != "unavailable",
