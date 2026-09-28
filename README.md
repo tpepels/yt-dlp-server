@@ -90,7 +90,7 @@ Open `http://YOUR-SERVER-IP:4545`.
 Direct-to-library downloads are deliberately not supported. A job now has two phases:
 
 1. **Download/stage** - media, metadata sidecars and partial retries remain under `/data/tmp/staging/<collection-id>/`, which is on the persistent `/srv/yt-dlp-server/tmp` host mount.
-2. **Validate/publish** - after the job is complete, the server derives one album/collection name and one album artist for the collection, retags the staged audio, copies it into a hidden `.incoming` directory inside `YT-DLP Imports`, then publishes it into `Artist/Album/`. Only after that succeeds is the external staging directory removed.
+2. **Validate/publish** - after the job is complete, the server derives one album/collection name and one album artist for the collection, retags the staged audio, copies it into a hidden `.incoming` directory inside `YT-DLP Imports`, then publishes it into `Artist/Album/`. Only after that succeeds is the external staging directory removed. Tag updates use mutagen in place where supported so Opus/Vorbis cover metadata is preserved instead of remuxing every embedded stream through ffmpeg.
 
 The metadata rules are intentionally conservative:
 
@@ -215,6 +215,16 @@ To repair only one exact persisted source URL, add:
 Legacy standalone YouTube/YouTube Music watch URLs are **skipped by default**. The repair command is album-focused and will not turn an old one-track download into a one-file album directory. Add `--include-singles` only if you explicitly want those old single-video jobs considered too.
 
 Artist inference is conservative: a value must be supported by a majority of the fully inspected tracks. Explicit `album_artist` wins, followed by a stable `Artist - Topic` channel, followed by one consistent per-track artist. Playlist-level generic values are never trusted as the artist.
+
+## Removing finished or abandoned jobs
+
+Terminal job cards can be removed from the UI:
+
+- **Discard** on failed or metadata-waiting jobs removes the job and cleans its unpublished staging directory when no retry/resolution still shares that staging area.
+- **Remove from list** on succeeded jobs removes only the history card. Published music files are never deleted.
+- Queued/running jobs cannot be removed through this action while work is active.
+
+This is useful for album-level failures that are not worth resolving track-by-track, such as a Spotify album where every spotDL match failed.
 
 ## Persistent queue and restart recovery
 
