@@ -118,7 +118,7 @@ def title_artist(value):
     return ""
 
 
-def trustworthy_track_artist(info):
+def strict_music_artist(info):
     for key in ("artist", "album_artist"):
         value = clean_artist_name(info.get(key))
         if value:
@@ -130,8 +130,14 @@ def trustworthy_track_artist(info):
             value = clean_artist_name(raw)
             if value:
                 return value
+    return ""
 
-    return title_artist(info.get("track") or info.get("title"))
+
+def trustworthy_track_artist(info):
+    return (
+        strict_music_artist(info)
+        or title_artist(info.get("track") or info.get("title"))
+    )
 
 
 def unique_values(values):
@@ -177,20 +183,20 @@ def analyze_ytdlp(stage, job):
     explicit_album_artists = unique_values(
         clean_artist_name(info.get("album_artist")) for info in infos
     )
-    per_track_artists = [
-        trustworthy_track_artist(info)
+    strict_track_artists = [
+        strict_music_artist(info)
         for info in infos
     ]
-    unique_track_artists = unique_values(per_track_artists)
+    unique_strict_artists = unique_values(strict_track_artists)
 
     hinted_artist = clean_artist_name(job.get("source_album_artist"))
     if hinted_artist and hinted_artist != "Various Artists":
         album_artist = hinted_artist
     elif len(explicit_album_artists) == 1:
         album_artist = explicit_album_artists[0]
-    elif len(unique_track_artists) == 1:
-        album_artist = unique_track_artists[0]
-    elif len(unique_track_artists) > 1:
+    elif len(unique_strict_artists) == 1:
+        album_artist = unique_strict_artists[0]
+    elif len(unique_strict_artists) > 1:
         album_artist = "Various Artists"
     else:
         album_artist = ""
