@@ -1316,8 +1316,51 @@ def ignore_missing_youtube_track(job_id):
                 close_job_if_only_ignored_locked(candidate, ignored)
 
         persist_jobs_locked()
+        requested = jobs.get(job_id)
+        should_finalize = bool(
+            requested
+            and requested.get("status") == "succeeded"
+            and library_staging.media_files(
+                library_staging.stage_dir(TEMP_DIR, requested)
+            )
+        )
+
+    if should_finalize:
+        finalize_staged_job(job_id)
 
     return jsonify({"ok": True, "source_id": source_id}), 200
+
+
+@app.post("/api/jobs/<job_id>/metadata")
+def confirm_job_metadata(job_id):
+    payload = request.get_json(silent=True) or request.form
+    artist = library_staging.clean_artist_name(payload.get("artist"))
+    album = library_staging.clean_album_name(payload.get("album"))
+
+    if not artist:
+        return jsonify({"ok": False, "error": "Artist / album artist is required."}), 400
+    if not album:
+        return jsonify({"ok": False, "error": "Album name is required."}), 400
+
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            return jsonify({"ok": False, "error": "Job not found."}), 404
+        if job.get("status") != "needs_metadata":
+            return jsonify({"ok": False, "error": "This job is not waiting for metadata."}), 409
+
+        job["metadata_artist"] = artist
+        job["metadata_album"] = album
+        persist_jobs_locked()
+
+    result = finalize_staged_job(job_id)
+    if not result:
+        return jsonify({"ok": False, "error": "Job disappeared during finalization."}), 404
+    if result.get("status") == "published":
+        return jsonify({"ok": True, "final_dir": result.get("final_dir")}), 200
+    if result.get("status") == "needs_metadata":
+        return jsonify({"ok": False, "error": "Metadata is still incomplete."}), 409
+    return jsonify({"ok": False, "error": result.get("message") or "Library import failed."}), 500
 
 
 @app.post("/api/jobs/<job_id>/resolve")
@@ -1455,6 +1498,10 @@ def health():
             "jobs_state": {
                 "path": str(JOBS_STATE_FILE),
                 "persisted": JOBS_STATE_FILE.is_file(),
+            },
+            "staging": {
+                "path": str(TEMP_DIR / "staging"),
+                "outside_library": not str(TEMP_DIR).startswith(str(MUSIC_ROOT)),
             },
             "ignored_tracks": {
                 "path": str(IGNORED_TRACKS_FILE),
