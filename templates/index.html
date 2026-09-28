@@ -24,6 +24,7 @@
     .probe { min-height:20px; color:var(--muted); font-size:13px; }
     .probe.good { color:var(--good); }
     .probe.warn { color:var(--wait); }
+    .probe.hint { color:#9f9a86; }
     .path { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; word-break:break-all; }
     .sources { margin-top:14px; display:grid; gap:8px; }
     .sources-title { color:var(--text); font-size:13px; font-weight:650; }
@@ -547,16 +548,24 @@
 
         if (data.kind === "spotify") {
           playlistInput.disabled = true;
-          probeResult.textContent = data.title + " detected · spotDL will use Spotify metadata and try YouTube Music, YouTube, Bandcamp, then SoundCloud";
-          probeResult.className = "probe good";
+          const base = data.title + " detected · spotDL will use Spotify metadata and try YouTube Music, YouTube, Bandcamp, then SoundCloud";
+          probeResult.textContent = data.is_album
+            ? base
+            : base + " · Hint: this doesn't look like an album";
+          probeResult.className = data.is_album ? "probe good" : "probe hint";
         } else if (data.kind === "playlist") {
           const count = data.count ? " · " + data.count + " items" : "";
           const albumArtist = data.album_artist ? " · album artist: " + data.album_artist : "";
-          probeResult.textContent = "Playlist / album detected · " + data.title + count + albumArtist;
-          probeResult.className = "probe good";
+          if (data.is_album) {
+            probeResult.textContent = "Album detected · " + data.title + count + albumArtist;
+            probeResult.className = "probe good";
+          } else {
+            probeResult.textContent = "Playlist detected · " + data.title + count + albumArtist + " · Hint: this doesn't look like an album";
+            probeResult.className = "probe hint";
+          }
         } else {
-          probeResult.textContent = "Single item detected · " + data.title;
-          probeResult.className = "probe good";
+          probeResult.textContent = "Single item detected · " + data.title + " · Hint: this doesn't look like an album";
+          probeResult.className = "probe hint";
         }
         return true;
       } catch (error) {
