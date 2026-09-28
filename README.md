@@ -1,6 +1,6 @@
 # yt-dlp music server
 
-Small LAN web interface around [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [spotDL](https://github.com/spotDL/spotify-downloader). Paste a media URL, queue an audio-only download, and write the result into a Plex-friendly music tree. Spotify URLs use Spotify metadata while spotDL matches audio from YouTube Music, YouTube, Bandcamp, then SoundCloud.
+Small LAN web interface around [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [spotDL](https://github.com/spotDL/spotify-downloader). Paste a media URL, queue an audio-only download, stage it outside the Plex library, validate collection metadata, and only then publish it into a Plex-friendly music tree. Spotify URLs use Spotify metadata while spotDL matches audio from YouTube Music, YouTube, Bandcamp, then SoundCloud.
 
 ## What it does
 
@@ -17,8 +17,13 @@ Small LAN web interface around [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [s
 - Audio only
 - Keeps the best source audio format instead of transcoding everything to MP3
 - Embeds source metadata and cover art when available
-- Uses yt-dlp's music metadata fields first
-- Keeps all imports isolated under `YT-DLP Imports/`
+- Downloads every job into persistent staging under `/data/tmp/staging/` first
+- Publishes into the Plex library only after the complete job and metadata validation succeed
+- Uses collection-level metadata for albums/playlists instead of per-video uploader metadata
+- Never promotes arbitrary YouTube uploader/channel names to album artists
+- Stops in **Needs metadata** when artist or album cannot be derived, with editable fields in the UI
+- Retags the completed staged files with the validated album/album-artist metadata before publishing
+- Keeps all final imports isolated under `YT-DLP Imports/`
 - Uses persistent yt-dlp and spotDL archives to avoid accidental duplicates and support retry/continue
 - Includes ffmpeg, Deno, yt-dlp EJS support, curl-cffi, spotDL, and the BgUtils PO-token provider in the image
 - Optional `cookies.txt` support for sources that require login
@@ -33,16 +38,15 @@ Default output:
           Album/
             01 - Track [source-id].opus
 
-The extension follows the best source audio. If the extractor does not provide music metadata, the server does not invent it. It falls back to:
+The extension follows the best source audio. The source ID is kept in the filename to prevent collisions.
 
-    YT-DLP Imports/
-      Uploader/
-        Singles/
-          Video title [source-id].ext
+Downloads are **not** written directly to that tree. They first live under:
 
-That fallback is deliberate: generic uploads cannot scatter incorrectly tagged files through the rest of the collection.
+    /data/tmp/staging/<job-id>/
 
-The source ID is kept in the filename to prevent collisions. Embedded tags remain based on the extractor metadata.
+For YouTube/YouTube Music the server writes yt-dlp info JSON sidecars into staging, then evaluates the whole collection together. For playlists, one collection-level album name is selected (normally the playlist/album title), and arbitrary uploaders such as the person who happened to upload one video are never treated as album artists.
+
+If both artist/album-artist and album are trustworthy, the server retags the staged audio and publishes the complete collection. If either is unresolved, the job becomes **Needs metadata** and remains outside Plex until the user confirms the fields.
 
 ## Add it to the existing media-server compose
 
@@ -80,6 +84,24 @@ Then:
 
 Open `http://YOUR-SERVER-IP:4545`.
 
+
+## Staged imports and metadata gate
+
+Direct-to-library downloads are deliberately not supported. A job now has two phases:
+
+1. **Download/stage** - media, metadata sidecars and partial retries remain under `/data/tmp/staging/<collection-id>/`, which is on the persistent `/srv/yt-dlp-server/tmp` host mount.
+2. **Validate/publish** - after the job is complete, the server derives one album/collection name and one album artist for the collection, retags the staged audio, copies it into a hidden `.incoming` directory inside `YT-DLP Imports`, then publishes it into `Artist/Album/`. Only after that succeeds is the external staging directory removed.
+
+The metadata rules are intentionally conservative:
+
+- `album_artist` and `artist` music fields are trusted;
+- a YouTube channel ending in ` - Topic` may be used as an artist;
+- arbitrary uploaders/channels are **never** used as artists;
+- for a playlist, the collection title is preferred over individual videos' album fields, preventing a single playlist from fragmenting into `[Unknown Album]`, `Album - X`, and uploader-specific pseudo-albums;
+- multiple legitimate track artists become `Various Artists` at album level while track artists are retained where available;
+- exact placeholders such as `[Unknown Album]`, `Unknown Album`, `Unknown Artist`, and `Untitled` are rejected rather than published.
+
+When metadata cannot be resolved, the job shows **Needs metadata** with pre-filled **Artist / album artist** and **Album** fields. Editing those fields pauses automatic card refresh so the form is not overwritten while typing. **Move to library** performs the same retag + publish pipeline using the confirmed values.
 
 ## Spotify / spotDL
 
@@ -168,6 +190,30 @@ Ignoring does not fabricate or count a file as downloaded. A 13/14 playlist ther
 
 Retry remains available until the missing track is ignored, so temporary availability failures can still be retried instead.
 
+## Repairing imports created by older versions
+
+Versions before the staging pipeline may already have created uploader folders, duplicate pseudo-albums, or `[Unknown Album]` entries. The image includes a one-time repair tool that uses the persisted job URLs and source IDs to rebuild those imports.
+
+First run a **dry run**:
+
+    docker compose exec yt-dlp-server \
+      python /app/tools/repair_legacy_imports.py
+
+It probes the original YouTube/YouTube Music URLs again, groups the files by the original collection, prints the intended `Artist/Album` destination, and reports anything it cannot resolve. It does not modify files without `--apply`.
+
+After reviewing the plan:
+
+    docker compose exec yt-dlp-server \
+      python /app/tools/repair_legacy_imports.py --apply
+
+For each collection, the repair tool first copies and retags all replacement files into a hidden incoming directory. Only after the whole replacement collection is prepared successfully does it publish the corrected album and remove the old scattered copies. Arbitrary uploader names are never used as artists here either.
+
+To repair only one exact persisted source URL, add:
+
+    --url 'https://music.youtube.com/playlist?list=...'
+
+Single YouTube Music track jobs are also considered. They are repaired automatically when the source exposes an actual album field; otherwise they are reported as unresolved rather than assigned a made-up album.
+
 ## Persistent queue and restart recovery
 
 Job history and queued work are persisted to:
@@ -232,7 +278,7 @@ Watchtower does not rebuild locally built images, so it cannot update yt-dlp ins
 | `MUSIC_ROOT` | `/data/music` | Mounted Plex music root |
 | `IMPORT_SUBDIR` | `YT-DLP Imports` | Isolated directory inside the music root |
 | `STATE_DIR` | `/data/state` | Persistent archives, queue and job history |
-| `TEMP_DIR` | `/data/tmp` | Temporary files |
+| `TEMP_DIR` | `/data/tmp` | Persistent staging and temporary files; keep this outside `MUSIC_ROOT` |
 | `COOKIES_FILE` | empty | Optional Netscape-format cookies file |
 | `MAX_QUEUE` | `50` | Maximum waiting jobs |
 | `MAX_HISTORY` | `50` | In-memory UI history |
