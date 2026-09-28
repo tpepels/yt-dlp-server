@@ -11,6 +11,8 @@ from urllib.parse import parse_qs, urlparse
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
+import staging as library_staging
+
 app = Flask(__name__)
 
 PORT = int(os.getenv("PORT", "4545"))
@@ -37,18 +39,7 @@ IGNORED_TRACKS_FILE = STATE_DIR / "ignored-tracks.json"
 for directory in (IMPORT_ROOT, STATE_DIR, TEMP_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
-OUTPUT_TEMPLATE = (
-    "%(album_artist,artist,creator,uploader|Unknown Artist).120S/"
-    "%(album,playlist|Singles).160S/"
-    "%(track_number,playlist_index&{:02d} - |)s"
-    "%(track,title).180S [%(id)s].%(ext)s"
-)
-SPOTDL_OUTPUT_TEMPLATE = str(
-    IMPORT_ROOT
-    / "{album-artist}"
-    / "{album}"
-    / "{track-number} - {title} [{track-id}].{output-ext}"
-)
+OUTPUT_TEMPLATE = library_staging.staged_ytdlp_output_template()
 
 jobs = {}
 jobs_lock = threading.Lock()
@@ -214,7 +205,7 @@ def normalize_persisted_job(raw):
 
     now = time.time()
     job_id = str(raw.get("id") or uuid.uuid4().hex[:10])
-    status = raw.get("status") if raw.get("status") in {"queued", "running", "succeeded", "failed"} else "failed"
+    status = raw.get("status") if raw.get("status") in {"queued", "running", "finalizing", "needs_metadata", "succeeded", "failed"} else "failed"
     source = raw.get("source") or ("spotify" if is_spotify_url(raw["url"]) else "yt-dlp")
     retry_base_completed = raw.get("retry_base_completed")
     if retry_base_completed is None:
@@ -254,6 +245,14 @@ def normalize_persisted_job(raw):
         "spotify_track_url": raw.get("spotify_track_url"),
         "manual_source_url": raw.get("manual_source_url"),
         "download_query": raw.get("download_query"),
+        "staging_owner_id": raw.get("staging_owner_id"),
+        "source_title": raw.get("source_title"),
+        "source_album_artist": raw.get("source_album_artist"),
+        "metadata_artist": raw.get("metadata_artist"),
+        "metadata_album": raw.get("metadata_album"),
+        "staged_files": int(raw.get("staged_files") or 0),
+        "final_dir": raw.get("final_dir"),
+        "finalize_target_id": raw.get("finalize_target_id"),
     }
 
     if source == "yt-dlp":
@@ -275,7 +274,7 @@ def normalize_persisted_job(raw):
     # A process that was running when the container stopped cannot still be
     # running after restart. Preserve it as a retryable interruption instead
     # of silently starting it again and risking duplicate/forced downloads.
-    if job["status"] == "running":
+    if job["status"] in {"running", "finalizing"}:
         job["status"] = "failed"
         job["finished_at"] = now
         job["returncode"] = None
@@ -497,18 +496,10 @@ def apply_manual_resolution_success(job):
 
 
 def album_playlist_metadata_args(compilation=False):
-    album_artist_source = (
-        "Various Artists"
-        if compilation
-        else "%(playlist_channel,playlist_uploader,album_artist,artist|)s"
-    )
+    # Collection-level artist/album decisions are made after the entire
+    # download has finished. Never promote playlist uploader/channel names to
+    # album artists while downloading.
     return [
-        "--parse-metadata",
-        f"{album_artist_source}:%(album_artist)s",
-        "--replace-in-metadata",
-        "album_artist",
-        r"\s+- Topic$",
-        "",
         "--parse-metadata",
         "%(playlist_title,album,playlist|)s:%(album)s",
         "--parse-metadata",
@@ -653,7 +644,7 @@ def build_spotdl_command(job):
         "--bitrate",
         "disable",
         "--output",
-        SPOTDL_OUTPUT_TEMPLATE,
+        library_staging.staged_spotdl_output_template(TEMP_DIR, job),
         "--overwrite",
         "force" if job["force"] else "skip",
         "--lyrics",
@@ -680,6 +671,7 @@ def build_spotdl_command(job):
 
 
 def build_command(job):
+    stage = library_staging.ensure_stage_dir(TEMP_DIR, job)
     cmd = [
         "yt-dlp",
         "--newline",
@@ -696,12 +688,13 @@ def build_command(job):
         "jpg",
         "--no-embed-chapters",
         "--no-embed-info-json",
+        "--write-info-json",
         "--trim-filenames",
         "180",
         "--paths",
-        str(IMPORT_ROOT),
+        str(stage),
         "--paths",
-        f"temp:{TEMP_DIR}",
+        f"temp:{stage / '.tmp'}",
         "--output",
         OUTPUT_TEMPLATE,
         "--print",
