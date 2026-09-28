@@ -55,11 +55,11 @@ async function testServer(serverUrl) {
 }
 
 async function ensurePermission(serverUrl) {
-  const origin = permissionPattern(serverUrl);
-  const alreadyGranted = await chrome.permissions.contains({ origins: [origin] });
-  if (alreadyGranted) return true;
-
-  return await chrome.permissions.request({ origins: [origin] });
+  // Call request() directly from the click handler's call chain. If the host
+  // was already granted Chrome simply resolves true without another prompt.
+  return await chrome.permissions.request({
+    origins: [permissionPattern(serverUrl)],
+  });
 }
 
 saveButton.addEventListener("click", async () => {
