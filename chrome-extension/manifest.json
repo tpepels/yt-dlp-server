@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Send to yt-dlp Server",
+  "version": "1.0.0",
+  "description": "Send album links and selected URLs directly to your yt-dlp music server.",
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "scripting",
+    "storage"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "options_page": "options.html",
+  "action": {
+    "default_title": "yt-dlp server settings"
+  }
+}

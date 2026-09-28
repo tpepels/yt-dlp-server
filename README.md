@@ -85,6 +85,29 @@ Then:
 Open `http://YOUR-SERVER-IP:4545`.
 
 
+## Chrome extension
+
+The repository includes a Manifest V3 Chrome/Chromium extension in `chrome-extension/`.
+
+It adds **Send to yt-dlp server** to the right-click menu for:
+
+- links;
+- selected text containing one or more URLs;
+- selected hyperlink text, even when the visible text is not itself a URL.
+
+Selected text may contain up to 20 unique URLs. Each URL is first passed through the server's normal preflight probe, then queued with playlist/album mode enabled. Non-album links are still accepted, but the extension shows the same kind of small advisory warning rather than blocking them.
+
+Install it locally:
+
+1. Open `chrome://extensions`.
+2. Enable **Developer mode**.
+3. Choose **Load unpacked**.
+4. Select the `chrome-extension` directory.
+5. Click the extension icon (or open **Details -> Extension options**).
+6. Enter the server URL, for example `http://media-server:4545`, and choose **Save and test**.
+
+The extension does not request blanket host access at install time. It asks Chrome for permission only to the configured server origin. Page access for reading a right-click selection uses `activeTab`, which is temporary and tied to the user's context-menu action.
+
 ## Staged imports and metadata gate
 
 Direct-to-library downloads are deliberately not supported. A job now has two phases:

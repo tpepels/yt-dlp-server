@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>yt-dlp Server Extension</title>
+  <style>
+    :root { color-scheme: dark; --bg:#111315; --panel:#191c1f; --text:#f4f5f5; --muted:#9ca4aa; --line:#30363b; --good:#6fdc8c; --bad:#ff7b72; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { width:min(620px,calc(100% - 32px)); margin:48px auto; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:22px; }
+    h1 { margin:0 0 6px; font-size:24px; }
+    p { color:var(--muted); margin:0 0 18px; }
+    label { display:block; font-weight:650; margin-bottom:7px; }
+    input { width:100%; border:1px solid var(--line); border-radius:9px; background:#0e1012; color:var(--text); padding:11px 12px; font:inherit; outline:none; }
+    input:focus { border-color:#6b737b; }
+    .actions { display:flex; gap:9px; align-items:center; margin-top:12px; }
+    button { border:0; border-radius:9px; padding:10px 14px; background:#e9ecef; color:#111315; font:650 13px system-ui,sans-serif; cursor:pointer; }
+    button.secondary { background:#2b3035; color:#e9ecef; border:1px solid #41474d; }
+    #status { min-height:22px; margin-top:14px; color:var(--muted); }
+    #status.good { color:var(--good); }
+    #status.bad { color:var(--bad); }
+    code { color:#d8dde1; }
+    .hint { margin-top:18px; padding-top:16px; border-top:1px solid var(--line); font-size:12px; color:var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <div class="panel">
+    <h1>yt-dlp server</h1>
+    <p>Set the address of the music downloader on your LAN.</p>
+
+    <label for="server-url">Server URL</label>
+    <input id="server-url" type="url" placeholder="http://media-server:4545" autocomplete="off">
+
+    <div class="actions">
+      <button id="save" type="button">Save and test</button>
+      <button id="test" class="secondary" type="button">Test</button>
+    </div>
+
+    <div id="status"></div>
+
+    <div class="hint">
+      Chrome will ask for access only to the server origin you save. The extension then adds
+      <strong>Send to yt-dlp server</strong> to the right-click menu for links and selected text.
+      Selected text may contain one or several URLs.
+    </div>
+  </div>
+</main>
+<script src="options.js"></script>
+</body>
+</html>
