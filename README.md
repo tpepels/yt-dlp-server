@@ -199,7 +199,7 @@ First run a **dry run**:
     docker compose exec yt-dlp-server \
       python /app/tools/repair_legacy_imports.py
 
-It probes the original YouTube/YouTube Music URLs again, groups the files by the original collection, prints the intended `Artist/Album` destination, and reports anything it cannot resolve. It does not modify files without `--apply`.
+It probes the original YouTube/YouTube Music URLs again, groups the files by the original collection, prints the intended `Artist/Album` destination, and reports anything it cannot resolve. Album repair deliberately performs a **full per-track metadata probe** rather than yt-dlp's flat-playlist probe: this is slower, but it recovers `album_artist`, `artist`, and stable `Artist - Topic` channel metadata that flat playlist data often omits. Successful full probes are cached under `/data/state/repair-metadata-cache/`, so the later `--apply` reuses the exact metadata reviewed in the dry run instead of querying every track again. Add `--refresh-metadata` if the source has changed and you intentionally want to rebuild that cache. It does not modify music files without `--apply`.
 
 After reviewing the plan:
 
@@ -212,7 +212,9 @@ To repair only one exact persisted source URL, add:
 
     --url 'https://music.youtube.com/playlist?list=...'
 
-Single YouTube Music track jobs are also considered. They are repaired automatically when the source exposes an actual album field; otherwise they are reported as unresolved rather than assigned a made-up album.
+Legacy standalone YouTube/YouTube Music watch URLs are **skipped by default**. The repair command is album-focused and will not turn an old one-track download into a one-file album directory. Add `--include-singles` only if you explicitly want those old single-video jobs considered too.
+
+Artist inference is conservative: a value must be supported by a majority of the fully inspected tracks. Explicit `album_artist` wins, followed by a stable `Artist - Topic` channel, followed by one consistent per-track artist. Playlist-level generic values are never trusted as the artist.
 
 ## Persistent queue and restart recovery
 

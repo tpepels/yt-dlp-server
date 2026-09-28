@@ -198,6 +198,128 @@ jobs:
           assert tags["album"] == "Correct Album", tags
           assert tags["artist"] == "Correct Artist", tags
           PY
+      - name: Validate legacy repair metadata inference
+        run: |
+          docker run --rm --user 1000:1000 \
+            -e MUSIC_ROOT=/tmp/music \
+            -e STATE_DIR=/tmp/state \
+            -e TEMP_DIR=/tmp/work \
+            yt-dlp-server:test python - <<'PY'
+          import tools.repair_legacy_imports as repair
+
+          # Regression: a playlist-level field such as "Release" must never
+          # beat stable per-track YouTube Music metadata.
+          iceberg = {
+              "title": "The Iceberg",
+              "artist": "Release",
+              "entries": [
+                  {
+                      "id": "aaa111",
+                      "album": "The Iceberg",
+                      "artist": "Oddisee",
+                      "uploader": "Oddisee - Topic",
+                  },
+                  {
+                      "id": "bbb222",
+                      "album": "The Iceberg",
+                      "artist": "Oddisee, Toine",
+                      "uploader": "Oddisee - Topic",
+                  },
+                  {
+                      "id": "ccc333",
+                      "album": "The Iceberg",
+                      "artist": "Oddisee, Olivier St.Louis",
+                      "uploader": "Oddisee - Topic",
+                  },
+              ],
+          }
+          artist, album, per_track, evidence = repair.collection_metadata(
+              iceberg, True
+          )
+          assert artist == "Oddisee", (artist, evidence)
+          assert album == "The Iceberg", (album, evidence)
+          assert "Topic" in evidence["artist"], evidence
+          assert set(per_track) == {"aaa111", "bbb222", "ccc333"}
+
+          # Missing artist fields are recoverable from a stable Topic channel.
+          aethiopes = {
+              "title": "Aethiopes",
+              "entries": [
+                  {
+                      "id": f"id{i:04d}",
+                      "album": "Aethiopes",
+                      "uploader": "billy woods - Topic",
+                  }
+                  for i in range(13)
+              ],
+          }
+          artist, album, _, evidence = repair.collection_metadata(
+              aethiopes, True
+          )
+          assert artist == "billy woods", (artist, evidence)
+          assert album == "Aethiopes", (album, evidence)
+
+          # One populated field in a whole album is not enough evidence.
+          weak = {
+              "title": "Unsafe Guess",
+              "entries": [
+                  {
+                      "id": f"weak{i:02d}",
+                      "album": "Unsafe Guess",
+                      "album_artist": "One Lucky Value" if i == 0 else None,
+                  }
+                  for i in range(10)
+              ],
+          }
+          artist, album, _, _ = repair.collection_metadata(weak, True)
+          assert artist == "", artist
+          assert album == "Unsafe Guess", album
+
+          assert repair.is_single_video_url(
+              "https://music.youtube.com/watch?v=CdUT-WJVhyI"
+          )
+          assert not repair.is_single_video_url(
+              "https://music.youtube.com/playlist?list=OLAK5uy_test"
+          )
+
+          # Repair metadata probing must be full, not flat.
+          captured = []
+          class Completed:
+              returncode = 0
+              stdout = '{"title":"Album","entries":[]}'
+              stderr = ""
+          real_run = repair.subprocess.run
+          repair.subprocess.run = lambda cmd, **kwargs: (
+              captured.extend(cmd) or Completed()
+          )
+          try:
+              repair.probe_source(
+                  "https://music.youtube.com/playlist?list=OLAK5uy_test",
+                  True,
+              )
+          finally:
+              repair.subprocess.run = real_run
+          assert "--flat-playlist" not in captured, captured
+          assert "--yes-playlist" in captured, captured
+
+          # The reviewed dry-run metadata should be reused by --apply.
+          import pathlib
+          import tempfile
+          cache = pathlib.Path(tempfile.mkdtemp())
+          calls = []
+          repair.subprocess.run = lambda cmd, **kwargs: (
+              calls.append(cmd) or Completed()
+          )
+          try:
+              url = "https://music.youtube.com/playlist?list=OLAK5uy_cache"
+              first = repair.probe_source(url, True, cache_dir=cache)
+              second = repair.probe_source(url, True, cache_dir=cache)
+          finally:
+              repair.subprocess.run = real_run
+          assert first == second
+          assert len(calls) == 1, calls
+          assert list(cache.glob("*.json")), list(cache.iterdir())
+          PY
       - name: Validate persistent queue state
         run: |
           docker run --rm --user 1000:1000 \
