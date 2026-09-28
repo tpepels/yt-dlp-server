@@ -1237,6 +1237,59 @@ def download():
     return redirect(url_for("index"))
 
 
+@app.delete("/api/jobs/<job_id>")
+def remove_job(job_id):
+    removable_statuses = {"failed", "succeeded", "needs_metadata"}
+
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            return jsonify({"ok": False, "error": "Job not found."}), 404
+        if job.get("status") not in removable_statuses:
+            return jsonify({
+                "ok": False,
+                "error": "Only finished, failed, or metadata-waiting jobs can be removed.",
+            }), 409
+
+        owner_id = library_staging.staging_owner_id(job)
+        active_related = [
+            other
+            for other in jobs.values()
+            if other.get("id") != job_id
+            and (
+                other.get("retry_of") == job_id
+                or other.get("resolution_of") == job_id
+                or library_staging.staging_owner_id(other) == owner_id
+            )
+            and other.get("status") in {"queued", "running", "finalizing"}
+        ]
+        if active_related:
+            return jsonify({
+                "ok": False,
+                "error": "A retry or resolution for this job is still active.",
+            }), 409
+
+        shared_stage = any(
+            other.get("id") != job_id
+            and library_staging.staging_owner_id(other) == owner_id
+            for other in jobs.values()
+        )
+        discard_staging = job.get("status") != "succeeded" and not shared_stage
+
+        jobs.pop(job_id, None)
+        persist_jobs_locked()
+
+    discarded_path = None
+    if discard_staging:
+        discarded_path = str(library_staging.discard_stage(TEMP_DIR, job))
+
+    return jsonify({
+        "ok": True,
+        "removed": job_id,
+        "discarded_staging": bool(discarded_path),
+    }), 200
+
+
 @app.post("/api/jobs/<job_id>/retry")
 def retry_job(job_id):
     with jobs_lock:
