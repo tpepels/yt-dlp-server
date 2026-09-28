@@ -87,6 +87,12 @@ Open `http://YOUR-SERVER-IP:4545`.
 
 ## Chrome extension
 
+A ready-to-share package is available directly from the repository:
+
+[Download Chrome extension v1.0.0](https://github.com/tpepels/yt-dlp-server/raw/refs/heads/main/dist/yt-dlp-server-chrome-extension-v1.0.0.zip)
+
+Recipients only need to unzip it, open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the unzipped folder.
+
 The repository includes a Manifest V3 Chrome/Chromium extension in `chrome-extension/`.
 
 It adds **Send to yt-dlp server** to the right-click menu for:

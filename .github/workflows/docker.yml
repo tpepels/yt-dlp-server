@@ -60,6 +60,17 @@ jobs:
             -v "$PWD/chrome-extension:/extension:ro" \
             yt-dlp-server:test deno eval \
             'new Function(await Deno.readTextFile("/extension/service-worker.js")); new Function(await Deno.readTextFile("/extension/options.js"));'
+      - name: Validate packaged Chrome extension ZIP
+        run: |
+          test -s dist/yt-dlp-server-chrome-extension-v1.0.0.zip
+          unzip -t dist/yt-dlp-server-chrome-extension-v1.0.0.zip
+          tmp="$(mktemp -d)"
+          unzip -q dist/yt-dlp-server-chrome-extension-v1.0.0.zip -d "$tmp"
+          for file in manifest.json service-worker.js options.html options.js README.md; do
+            cmp "chrome-extension/$file" "$tmp/$file"
+          done
+          test -f "$tmp/manifest.json"
+          python -m json.tool "$tmp/manifest.json" >/dev/null
       - name: Validate non-root runtime, naming and playlist classification
         run: |
           docker run --rm --user 1000:1000 \
