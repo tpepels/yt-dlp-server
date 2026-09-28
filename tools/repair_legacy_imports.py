@@ -133,10 +133,16 @@ def collect_groups(jobs, import_root, only_url=None):
 
         group = groups.setdefault(
             url,
-            {"paths": {}, "attempts": 0, "playlist": bool(job.get("playlist"))},
+            {
+                "paths": {},
+                "attempts": 0,
+                "playlist": bool(job.get("collection_mode", job.get("playlist"))),
+            },
         )
         group["attempts"] += 1
-        group["playlist"] = group["playlist"] or bool(job.get("playlist"))
+        group["playlist"] = group["playlist"] or bool(
+            job.get("collection_mode", job.get("playlist"))
+        )
         for path in existing:
             source_id = staging.source_id_from_filename(path)
             key = source_id or str(path.resolve())
