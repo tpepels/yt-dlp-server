@@ -252,6 +252,7 @@ def normalize_persisted_job(raw):
         "staging_owner_id": raw.get("staging_owner_id"),
         "source_title": raw.get("source_title"),
         "source_album_artist": raw.get("source_album_artist"),
+        "source_thumbnail": raw.get("source_thumbnail"),
         "metadata_artist": raw.get("metadata_artist"),
         "metadata_album": raw.get("metadata_album"),
         "staged_files": int(raw.get("staged_files") or 0),
@@ -575,6 +576,22 @@ def infer_album_artist(info):
     return normalize_topic_artist(top) or None
 
 
+def best_thumbnail_url(info):
+    value = str(info.get("thumbnail") or "").strip()
+    if value.startswith(("http://", "https://")):
+        return value
+
+    thumbnails = info.get("thumbnails") or []
+    if isinstance(thumbnails, list):
+        for item in reversed(thumbnails):
+            if not isinstance(item, dict):
+                continue
+            candidate = str(item.get("url") or "").strip()
+            if candidate.startswith(("http://", "https://")):
+                return candidate
+    return None
+
+
 def classify_probe_info(info, url=None):
     entries = info.get("entries")
     kind = (
@@ -602,6 +619,7 @@ def classify_probe_info(info, url=None):
         "extractor": extractor or None,
         "album_mode": album_mode,
         "album_artist": infer_album_artist(info) if album_mode else None,
+        "thumbnail": best_thumbnail_url(info),
     }
 
 
@@ -1098,6 +1116,9 @@ def public_jobs():
                     if item.get("source") == "youtube" and item.get("ignored")
                 ),
                 "staging_owner_id": job.get("staging_owner_id"),
+                "source_title": job.get("source_title") or "",
+                "source_album_artist": job.get("source_album_artist") or "",
+                "source_thumbnail": job.get("source_thumbnail") or "",
                 "metadata_artist": job.get("metadata_artist") or "",
                 "metadata_album": job.get("metadata_album") or "",
                 "staged_files": job.get("staged_files", 0),
@@ -1202,6 +1223,7 @@ def download():
             if probe_result and album_mode
             else None
         ),
+        "source_thumbnail": probe_result.get("thumbnail") if probe_result else None,
         "metadata_artist": None,
         "metadata_album": None,
         "staged_files": 0,
@@ -1345,6 +1367,7 @@ def retry_job(job_id):
             "staging_owner_id": previous.get("staging_owner_id") or retry_id,
             "source_title": previous.get("source_title"),
             "source_album_artist": previous.get("source_album_artist"),
+            "source_thumbnail": previous.get("source_thumbnail"),
             "metadata_artist": previous.get("metadata_artist"),
             "metadata_album": previous.get("metadata_album"),
             "staged_files": previous.get("staged_files", 0),
@@ -1537,6 +1560,7 @@ def resolve_missing_spotify_track(job_id):
             "staging_owner_id": parent.get("staging_owner_id") or resolution_id,
             "source_title": parent.get("source_title"),
             "source_album_artist": parent.get("source_album_artist"),
+            "source_thumbnail": parent.get("source_thumbnail"),
             "metadata_artist": parent.get("metadata_artist"),
             "metadata_album": parent.get("metadata_album"),
             "staged_files": parent.get("staged_files", 0),
