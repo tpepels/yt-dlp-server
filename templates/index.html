@@ -50,6 +50,8 @@
     .track-progress-fill { height:100%; width:0; background:#8ab4f8; transition:width .2s ease; }
     .job-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
     .retry-button { min-height:34px; padding:7px 12px; background:#dfe5ea; font-size:12px; }
+    .remove-button { min-height:34px; padding:7px 12px; background:#25292d; color:#b9bec3; border:1px solid #3b4045; font-size:12px; }
+    .remove-button:hover { background:#30353a; }
     .missing-tracks { display:grid; gap:9px; margin-top:11px; }
     .missing-track { min-width:0; border:1px solid #4b3b2c; background:#1b1815; border-radius:9px; padding:10px; }
     .missing-track-title { font-size:13px; font-weight:650; color:#f0d7b0; overflow-wrap:anywhere; }
@@ -476,6 +478,52 @@
 
         actions.appendChild(retry);
         card.appendChild(actions);
+      }
+
+      if (["failed", "succeeded", "needs_metadata"].includes(job.status)) {
+        const removeActions = document.createElement("div");
+        removeActions.className = "job-actions";
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "remove-button";
+        const destructive = job.status !== "succeeded";
+        remove.textContent = destructive ? "Discard" : "Remove from list";
+
+        remove.addEventListener("click", async () => {
+          if (destructive) {
+            const confirmed = window.confirm(
+              "Discard this unfinished job and its staged files? " +
+              "Anything already published in the music library will not be touched."
+            );
+            if (!confirmed) return;
+          }
+
+          remove.disabled = true;
+          const originalText = remove.textContent;
+          remove.textContent = destructive ? "Discarding…" : "Removing…";
+          try {
+            const response = await fetch("/api/jobs/" + encodeURIComponent(job.id), {
+              method: "DELETE",
+              headers: {"Accept": "application/json"},
+            });
+            const data = await response.json();
+            if (!response.ok || !data.ok) {
+              remove.textContent = data.error || "Could not remove job";
+              return;
+            }
+            await refreshJobs(true);
+          } catch (_) {
+            remove.textContent = "Could not remove job";
+          } finally {
+            if (document.body.contains(remove) && !remove.disabled) {
+              remove.textContent = originalText;
+            }
+          }
+        });
+
+        removeActions.appendChild(remove);
+        card.appendChild(removeActions);
       }
 
       if ((job.files && job.files.length) || (job.log && job.log.length)) {
