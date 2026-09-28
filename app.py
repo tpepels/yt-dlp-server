@@ -1082,6 +1082,35 @@ def run_job(job_id):
             job["log"].append(f"ERROR: {exc}")
             persist_jobs_locked()
 
+def backfill_job_display_metadata():
+    with jobs_lock:
+        candidates = [
+            (job["id"], job["url"])
+            for job in jobs.values()
+            if job.get("source") == "spotify"
+            and not job.get("source_title")
+        ]
+
+    changed = False
+    for job_id, url in candidates:
+        result = probe_spotify_url(url)
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if not job:
+                continue
+            title = result.get("title")
+            thumbnail = result.get("thumbnail")
+            if title and title != f"Spotify {spotify_link_type(url)}":
+                job["source_title"] = title
+                changed = True
+            if thumbnail:
+                job["source_thumbnail"] = thumbnail
+                changed = True
+
+    if changed:
+        persist_jobs()
+
+
 def worker():
     while True:
         job_id = download_queue.get()
@@ -1117,6 +1146,11 @@ for restored_id in restored_queue_ids:
                 persist_jobs_locked()
 
 threading.Thread(target=worker, name="yt-dlp-worker", daemon=True).start()
+threading.Thread(
+    target=backfill_job_display_metadata,
+    name="job-display-metadata",
+    daemon=True,
+).start()
 
 
 def public_jobs():
