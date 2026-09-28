@@ -587,12 +587,19 @@ def classify_probe_info(info, url=None):
     if not isinstance(count, int) or count < 1:
         count = len(entries) if isinstance(entries, list) and entries else None
 
-    album_mode = bool(url and is_youtube_album_playlist(url))
+    extractor = str(info.get("extractor_key") or info.get("extractor") or "")
+    path = urlparse(url).path.lower() if url else ""
+    album_mode = bool(
+        (url and is_youtube_album_playlist(url))
+        or info.get("album")
+        or "/album/" in path
+        or "album" in extractor.lower()
+    )
     return {
         "kind": kind,
         "title": info.get("title") or info.get("fulltitle") or "Untitled",
         "count": count,
-        "extractor": info.get("extractor_key") or info.get("extractor"),
+        "extractor": extractor or None,
         "album_mode": album_mode,
         "album_artist": infer_album_artist(info) if album_mode else None,
     }
@@ -1505,13 +1512,15 @@ def api_probe():
         return jsonify({"ok": False, "error": error}), 400
 
     if is_spotify_url(url):
+        spotify_type = spotify_link_type(url)
         return jsonify({
             "ok": True,
             "kind": "spotify",
-            "title": f"Spotify {spotify_link_type(url)}",
+            "title": f"Spotify {spotify_type}",
             "count": None,
             "extractor": "spotDL",
-            "album_mode": False,
+            "album_mode": spotify_type == "album",
+            "is_album": spotify_type == "album",
             "album_artist": None,
         })
 
@@ -1522,7 +1531,11 @@ def api_probe():
     except RuntimeError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 502
 
-    return jsonify({"ok": True, **result})
+    return jsonify({
+        "ok": True,
+        **result,
+        "is_album": bool(result.get("album_mode")),
+    })
 
 
 @app.get("/api/jobs")
