@@ -71,6 +71,28 @@ jobs:
           done
           test -f "$tmp/manifest.json"
           python -m json.tool "$tmp/manifest.json" >/dev/null
+      - name: Validate site extension download
+        run: |
+          grep -q "download_chrome_extension" templates/index.html
+          grep -q "Chrome extension" templates/index.html
+          grep -q "COPY dist ./dist" Dockerfile
+          docker run --rm --user 1000:1000 \
+            -e MUSIC_ROOT=/tmp/music \
+            -e STATE_DIR=/tmp/state \
+            -e TEMP_DIR=/tmp/work \
+            yt-dlp-server:test python - <<'PY'
+          import app
+
+          assert app.CHROME_EXTENSION_ZIP.is_file(), app.CHROME_EXTENSION_ZIP
+          client = app.app.test_client()
+          response = client.get("/chrome-extension.zip")
+          assert response.status_code == 200, response.data
+          assert response.data[:2] == b"PK", response.data[:16]
+          disposition = response.headers.get("Content-Disposition", "")
+          assert "attachment" in disposition.lower(), disposition
+          assert "yt-dlp-server-chrome-extension-v1.0.0.zip" in disposition, disposition
+          assert response.mimetype == "application/zip", response.mimetype
+          PY
       - name: Validate non-root runtime, naming and playlist classification
         run: |
           docker run --rm --user 1000:1000 \

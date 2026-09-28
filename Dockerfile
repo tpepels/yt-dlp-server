@@ -44,6 +44,7 @@ COPY app.py staging.py ./
 COPY tools ./tools
 COPY templates ./templates
 COPY static ./static
+COPY dist ./dist
 
 EXPOSE 4545
 

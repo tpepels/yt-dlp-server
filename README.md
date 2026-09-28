@@ -87,6 +87,8 @@ Open `http://YOUR-SERVER-IP:4545`.
 
 ## Chrome extension
 
+The running web app also exposes the same ZIP directly from the page through the **Chrome extension** button. The download is served by the yt-dlp server itself at `/chrome-extension.zip`, so users do not need GitHub access once the server is running.
+
 A ready-to-share package is available directly from the repository:
 
 [Download Chrome extension v1.0.0](https://github.com/tpepels/yt-dlp-server/raw/refs/heads/main/dist/yt-dlp-server-chrome-extension-v1.0.0.zip)
