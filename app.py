@@ -11,6 +11,8 @@ from urllib.parse import parse_qs, urlparse
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
+import staging as library_staging
+
 app = Flask(__name__)
 
 PORT = int(os.getenv("PORT", "4545"))
@@ -28,6 +30,9 @@ YOUTUBE_PLAYER_CLIENT = os.getenv("YOUTUBE_PLAYER_CLIENT", "mweb").strip() or "m
 if not IMPORT_SUBDIR or Path(IMPORT_SUBDIR).is_absolute() or ".." in Path(IMPORT_SUBDIR).parts:
     raise RuntimeError("IMPORT_SUBDIR must be a safe relative path")
 
+if TEMP_DIR.resolve() == MUSIC_ROOT.resolve() or MUSIC_ROOT.resolve() in TEMP_DIR.resolve().parents:
+    raise RuntimeError("TEMP_DIR must be outside MUSIC_ROOT so staging cannot be indexed by Plex")
+
 IMPORT_ROOT = MUSIC_ROOT / IMPORT_SUBDIR
 ARCHIVE_FILE = STATE_DIR / "archive.txt"
 SPOTDL_ARCHIVE_FILE = STATE_DIR / "spotdl-archive.txt"
@@ -37,18 +42,7 @@ IGNORED_TRACKS_FILE = STATE_DIR / "ignored-tracks.json"
 for directory in (IMPORT_ROOT, STATE_DIR, TEMP_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
-OUTPUT_TEMPLATE = (
-    "%(album_artist,artist,creator,uploader|Unknown Artist).120S/"
-    "%(album,playlist|Singles).160S/"
-    "%(track_number,playlist_index&{:02d} - |)s"
-    "%(track,title).180S [%(id)s].%(ext)s"
-)
-SPOTDL_OUTPUT_TEMPLATE = str(
-    IMPORT_ROOT
-    / "{album-artist}"
-    / "{album}"
-    / "{track-number} - {title} [{track-id}].{output-ext}"
-)
+OUTPUT_TEMPLATE = library_staging.staged_ytdlp_output_template()
 
 jobs = {}
 jobs_lock = threading.Lock()
@@ -214,7 +208,7 @@ def normalize_persisted_job(raw):
 
     now = time.time()
     job_id = str(raw.get("id") or uuid.uuid4().hex[:10])
-    status = raw.get("status") if raw.get("status") in {"queued", "running", "succeeded", "failed"} else "failed"
+    status = raw.get("status") if raw.get("status") in {"queued", "running", "finalizing", "needs_metadata", "succeeded", "failed"} else "failed"
     source = raw.get("source") or ("spotify" if is_spotify_url(raw["url"]) else "yt-dlp")
     retry_base_completed = raw.get("retry_base_completed")
     if retry_base_completed is None:
@@ -228,6 +222,7 @@ def normalize_persisted_job(raw):
         "id": job_id,
         "url": str(raw["url"]),
         "playlist": bool(raw.get("playlist", False)),
+        "collection_mode": bool(raw.get("collection_mode", raw.get("playlist", False))),
         "album_mode": bool(raw.get("album_mode", False)),
         "compilation": bool(raw.get("compilation", False)),
         "force": bool(raw.get("force", False)),
@@ -254,6 +249,14 @@ def normalize_persisted_job(raw):
         "spotify_track_url": raw.get("spotify_track_url"),
         "manual_source_url": raw.get("manual_source_url"),
         "download_query": raw.get("download_query"),
+        "staging_owner_id": raw.get("staging_owner_id"),
+        "source_title": raw.get("source_title"),
+        "source_album_artist": raw.get("source_album_artist"),
+        "metadata_artist": raw.get("metadata_artist"),
+        "metadata_album": raw.get("metadata_album"),
+        "staged_files": int(raw.get("staged_files") or 0),
+        "final_dir": raw.get("final_dir"),
+        "finalize_target_id": raw.get("finalize_target_id"),
     }
 
     if source == "yt-dlp":
@@ -275,7 +278,7 @@ def normalize_persisted_job(raw):
     # A process that was running when the container stopped cannot still be
     # running after restart. Preserve it as a retryable interruption instead
     # of silently starting it again and risking duplicate/forced downloads.
-    if job["status"] == "running":
+    if job["status"] in {"running", "finalizing"}:
         job["status"] = "failed"
         job["finished_at"] = now
         job["returncode"] = None
@@ -497,18 +500,10 @@ def apply_manual_resolution_success(job):
 
 
 def album_playlist_metadata_args(compilation=False):
-    album_artist_source = (
-        "Various Artists"
-        if compilation
-        else "%(playlist_channel,playlist_uploader,album_artist,artist|)s"
-    )
+    # Collection-level artist/album decisions are made after the entire
+    # download has finished. Never promote playlist uploader/channel names to
+    # album artists while downloading.
     return [
-        "--parse-metadata",
-        f"{album_artist_source}:%(album_artist)s",
-        "--replace-in-metadata",
-        "album_artist",
-        r"\s+- Topic$",
-        "",
         "--parse-metadata",
         "%(playlist_title,album,playlist|)s:%(album)s",
         "--parse-metadata",
@@ -552,12 +547,15 @@ def infer_album_artist(info):
     for entry in info.get("entries") or []:
         if not isinstance(entry, dict):
             continue
-        value = (
-            entry.get("artist")
-            or entry.get("album_artist")
-            or entry.get("uploader")
-            or entry.get("channel")
-        )
+
+        value = entry.get("album_artist") or entry.get("artist")
+        if not value:
+            for key in ("uploader", "channel"):
+                raw = str(entry.get(key) or "").strip()
+                if re.search(r"\s+-\s+Topic$", raw, flags=re.IGNORECASE):
+                    value = raw
+                    break
+
         value = normalize_topic_artist(value)
         if value:
             artists.add(value)
@@ -567,11 +565,14 @@ def infer_album_artist(info):
     if len(artists) == 1:
         return next(iter(artists))
 
-    return normalize_topic_artist(
-        info.get("album_artist")
-        or info.get("uploader")
-        or info.get("channel")
-    ) or None
+    top = info.get("album_artist") or info.get("artist")
+    if not top:
+        for key in ("uploader", "channel"):
+            raw = str(info.get(key) or "").strip()
+            if re.search(r"\s+-\s+Topic$", raw, flags=re.IGNORECASE):
+                top = raw
+                break
+    return normalize_topic_artist(top) or None
 
 
 def classify_probe_info(info, url=None):
@@ -653,7 +654,7 @@ def build_spotdl_command(job):
         "--bitrate",
         "disable",
         "--output",
-        SPOTDL_OUTPUT_TEMPLATE,
+        library_staging.staged_spotdl_output_template(TEMP_DIR, job),
         "--overwrite",
         "force" if job["force"] else "skip",
         "--lyrics",
@@ -680,6 +681,7 @@ def build_spotdl_command(job):
 
 
 def build_command(job):
+    stage = library_staging.ensure_stage_dir(TEMP_DIR, job)
     cmd = [
         "yt-dlp",
         "--newline",
@@ -696,12 +698,13 @@ def build_command(job):
         "jpg",
         "--no-embed-chapters",
         "--no-embed-info-json",
+        "--write-info-json",
         "--trim-filenames",
         "180",
         "--paths",
-        str(IMPORT_ROOT),
+        str(stage),
         "--paths",
-        f"temp:{TEMP_DIR}",
+        f"temp:{stage / '.tmp'}",
         "--output",
         OUTPUT_TEMPLATE,
         "--print",
@@ -791,6 +794,110 @@ def append_log(job_id, line):
         job["log"].append(line)
         job["log"] = job["log"][-40:]
 
+def finalize_staged_job(job_id):
+    with jobs_lock:
+        source_job = jobs.get(job_id)
+        if not source_job:
+            return None
+
+        target_id = source_job.get("finalize_target_id") or job_id
+        target_job = jobs.get(target_id) or source_job
+        target_id = target_job["id"]
+
+        # Manual resolution/retry jobs can share the original collection's
+        # staging directory. Keep the target pointed at that same owner.
+        if not target_job.get("staging_owner_id") and source_job.get("staging_owner_id"):
+            target_job["staging_owner_id"] = source_job["staging_owner_id"]
+
+        target_job["status"] = "finalizing"
+        target_job["message"] = "Validating metadata before library import"
+        persist_jobs_locked()
+
+        snapshot = dict(target_job)
+        artist_override = target_job.get("metadata_artist")
+        album_override = target_job.get("metadata_album")
+
+    try:
+        result = library_staging.publish_stage(
+            TEMP_DIR,
+            IMPORT_ROOT,
+            snapshot,
+            artist=artist_override,
+            album=album_override,
+        )
+    except Exception as exc:
+        result = {
+            "status": "error",
+            "message": str(exc),
+            "artist": artist_override or "",
+            "album": album_override or "",
+            "media_count": 0,
+        }
+
+    with jobs_lock:
+        target_job = jobs.get(target_id)
+        source_job = jobs.get(job_id)
+        if not target_job:
+            return result
+
+        target_job["metadata_artist"] = result.get("artist") or ""
+        target_job["metadata_album"] = result.get("album") or ""
+        target_job["staged_files"] = int(result.get("media_count") or 0)
+
+        if result["status"] == "needs_metadata":
+            target_job["status"] = "needs_metadata"
+            target_job["message"] = (
+                f"Ready to import - {target_job['staged_files']} staged file(s); "
+                "confirm artist and album"
+            )
+        elif result["status"] == "published":
+            target_job["status"] = "succeeded"
+            target_job["progress"] = ""
+            target_job["failed_items"] = 0
+            target_job["final_dir"] = result.get("final_dir")
+            target_job["files"] = list(result.get("files") or [])
+            target_job["staged_files"] = 0
+            target_job["finished_at"] = time.time()
+
+            ignored_count = sum(
+                1 for item in target_job.get("missing_tracks", [])
+                if item.get("source") == "youtube" and item.get("ignored")
+            )
+            artist = result.get("artist") or ""
+            album = result.get("album") or ""
+            if target_job.get("total_items"):
+                suffix = f"; {ignored_count} ignored" if ignored_count else ""
+                target_job["message"] = (
+                    f"Published - {target_job['completed_items']}/{target_job['total_items']} "
+                    f"tracks saved{suffix} - {artist} / {album}"
+                )
+            else:
+                target_job["message"] = (
+                    f"Published - {len(target_job['files'])} file(s) - {artist} / {album}"
+                )
+        else:
+            target_job["status"] = "failed"
+            target_job["message"] = f"Library import failed: {result.get('message') or 'unknown error'}"
+            target_job["finished_at"] = time.time()
+
+        if source_job and source_job["id"] != target_job["id"]:
+            if result["status"] == "published":
+                source_job["status"] = "succeeded"
+                source_job["message"] = "Resolved missing track - album published"
+                source_job["finished_at"] = time.time()
+            elif result["status"] == "needs_metadata":
+                source_job["status"] = "succeeded"
+                source_job["message"] = "Resolved missing track - album waiting for metadata"
+                source_job["finished_at"] = time.time()
+            else:
+                source_job["status"] = "failed"
+                source_job["message"] = target_job["message"]
+                source_job["finished_at"] = time.time()
+
+        persist_jobs_locked()
+    return result
+
+
 def run_job(job_id):
     with jobs_lock:
         job = jobs[job_id]
@@ -833,6 +940,7 @@ def run_job(job_id):
 
         spotdl_missing_tracks = extract_spotdl_missing_tracks(spotdl_errors)
 
+        should_finalize = False
         with jobs_lock:
             job = jobs[job_id]
             job["returncode"] = returncode
@@ -859,6 +967,11 @@ def run_job(job_id):
             failed = (returncode != 0 or bool(spotdl_errors)) and not ignored_youtube_only
             if not failed:
                 job["status"] = "succeeded"
+                should_finalize = bool(
+                    library_staging.media_files(
+                        library_staging.stage_dir(TEMP_DIR, job)
+                    )
+                )
                 if is_spotify:
                     if job["total_items"]:
                         job["message"] = f"Completed - {job['completed_items']}/{job['total_items']} tracks saved"
@@ -892,6 +1005,9 @@ def run_job(job_id):
                 else:
                     job["message"] = f"yt-dlp exited with code {returncode}"
             persist_jobs_locked()
+
+        if should_finalize:
+            finalize_staged_job(job_id)
     except Exception as exc:
         with jobs_lock:
             job = jobs[job_id]
@@ -911,6 +1027,18 @@ def worker():
 
 
 restored_queue_ids = load_persisted_jobs()
+
+with jobs_lock:
+    restored_finalize_ids = [
+        job["id"]
+        for job in jobs.values()
+        if job.get("status") == "succeeded"
+        and library_staging.media_files(library_staging.stage_dir(TEMP_DIR, job))
+    ]
+
+for restored_id in restored_finalize_ids:
+    finalize_staged_job(restored_id)
+
 for restored_id in restored_queue_ids:
     try:
         download_queue.put_nowait(restored_id)
@@ -962,6 +1090,11 @@ def public_jobs():
                     1 for item in job.get("missing_tracks", [])
                     if item.get("source") == "youtube" and item.get("ignored")
                 ),
+                "staging_owner_id": job.get("staging_owner_id"),
+                "metadata_artist": job.get("metadata_artist") or "",
+                "metadata_album": job.get("metadata_album") or "",
+                "staged_files": job.get("staged_files", 0),
+                "final_dir": job.get("final_dir"),
             }
             for job in ordered
         ]
@@ -990,14 +1123,28 @@ def download():
         ), 400
 
     source = "spotify" if is_spotify_url(url) else "yt-dlp"
-    playlist_enabled = request.form.get("playlist") == "on" if source == "yt-dlp" else False
-    album_mode = source == "yt-dlp" and playlist_enabled and is_youtube_album_playlist(url)
-    probe_result = get_cached_probe_result(url) if album_mode else None
-    if album_mode and probe_result is None:
+    playlist_requested = request.form.get("playlist") == "on" if source == "yt-dlp" else False
+    probe_result = get_cached_probe_result(url) if source == "yt-dlp" else None
+    if source == "yt-dlp" and probe_result is None:
         try:
             probe_result = probe_url(url)
         except (subprocess.TimeoutExpired, RuntimeError):
             probe_result = None
+
+    detected_collection = bool(
+        probe_result and probe_result.get("kind") == "playlist"
+    )
+    playlist_enabled = bool(
+        source == "yt-dlp"
+        and playlist_requested
+        and (detected_collection if probe_result else True)
+    )
+    collection_mode = bool(playlist_enabled and detected_collection)
+    album_mode = bool(
+        source == "yt-dlp"
+        and collection_mode
+        and is_youtube_album_playlist(url)
+    )
 
     compilation = bool(
         probe_result
@@ -1014,6 +1161,7 @@ def download():
         "id": job_id,
         "url": url,
         "playlist": playlist_enabled,
+        "collection_mode": collection_mode,
         "album_mode": album_mode,
         "compilation": compilation,
         "force": request.form.get("force") == "on",
@@ -1040,6 +1188,18 @@ def download():
         "spotify_track_url": None,
         "manual_source_url": None,
         "download_query": None,
+        "staging_owner_id": job_id,
+        "source_title": probe_result.get("title") if probe_result else None,
+        "source_album_artist": (
+            probe_result.get("album_artist")
+            if probe_result and album_mode
+            else None
+        ),
+        "metadata_artist": None,
+        "metadata_album": None,
+        "staged_files": 0,
+        "final_dir": None,
+        "finalize_target_id": None,
     }
 
     with jobs_lock:
@@ -1090,6 +1250,7 @@ def retry_job(job_id):
             "id": retry_id,
             "url": previous["url"],
             "playlist": previous["playlist"],
+            "collection_mode": previous.get("collection_mode", previous["playlist"]),
             "album_mode": previous["album_mode"],
             "compilation": previous["compilation"],
             # A retry is a continuation: never overwrite files that already succeeded.
@@ -1121,6 +1282,14 @@ def retry_job(job_id):
             "spotify_track_url": None,
             "manual_source_url": None,
             "download_query": None,
+            "staging_owner_id": previous.get("staging_owner_id") or retry_id,
+            "source_title": previous.get("source_title"),
+            "source_album_artist": previous.get("source_album_artist"),
+            "metadata_artist": previous.get("metadata_artist"),
+            "metadata_album": previous.get("metadata_album"),
+            "staged_files": previous.get("staged_files", 0),
+            "final_dir": None,
+            "finalize_target_id": None,
         }
         jobs[retry_id] = retry
         persist_jobs_locked()
@@ -1189,8 +1358,51 @@ def ignore_missing_youtube_track(job_id):
                 close_job_if_only_ignored_locked(candidate, ignored)
 
         persist_jobs_locked()
+        requested = jobs.get(job_id)
+        should_finalize = bool(
+            requested
+            and requested.get("status") == "succeeded"
+            and library_staging.media_files(
+                library_staging.stage_dir(TEMP_DIR, requested)
+            )
+        )
+
+    if should_finalize:
+        finalize_staged_job(job_id)
 
     return jsonify({"ok": True, "source_id": source_id}), 200
+
+
+@app.post("/api/jobs/<job_id>/metadata")
+def confirm_job_metadata(job_id):
+    payload = request.get_json(silent=True) or request.form
+    artist = library_staging.clean_artist_name(payload.get("artist"))
+    album = library_staging.clean_album_name(payload.get("album"))
+
+    if not artist:
+        return jsonify({"ok": False, "error": "Artist / album artist is required."}), 400
+    if not album:
+        return jsonify({"ok": False, "error": "Album name is required."}), 400
+
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            return jsonify({"ok": False, "error": "Job not found."}), 404
+        if job.get("status") != "needs_metadata":
+            return jsonify({"ok": False, "error": "This job is not waiting for metadata."}), 409
+
+        job["metadata_artist"] = artist
+        job["metadata_album"] = album
+        persist_jobs_locked()
+
+    result = finalize_staged_job(job_id)
+    if not result:
+        return jsonify({"ok": False, "error": "Job disappeared during finalization."}), 404
+    if result.get("status") == "published":
+        return jsonify({"ok": True, "final_dir": result.get("final_dir")}), 200
+    if result.get("status") == "needs_metadata":
+        return jsonify({"ok": False, "error": "Metadata is still incomplete."}), 409
+    return jsonify({"ok": False, "error": result.get("message") or "Library import failed."}), 500
 
 
 @app.post("/api/jobs/<job_id>/resolve")
@@ -1235,6 +1447,7 @@ def resolve_missing_spotify_track(job_id):
             "id": resolution_id,
             "url": spotify_url,
             "playlist": False,
+            "collection_mode": False,
             "album_mode": False,
             "compilation": False,
             "force": False,
@@ -1261,6 +1474,14 @@ def resolve_missing_spotify_track(job_id):
             "spotify_track_url": spotify_url,
             "manual_source_url": source_url,
             "download_query": f"{source_url}|{spotify_url}",
+            "staging_owner_id": parent.get("staging_owner_id") or resolution_id,
+            "source_title": parent.get("source_title"),
+            "source_album_artist": parent.get("source_album_artist"),
+            "metadata_artist": parent.get("metadata_artist"),
+            "metadata_album": parent.get("metadata_album"),
+            "staged_files": parent.get("staged_files", 0),
+            "final_dir": None,
+            "finalize_target_id": job_id,
         }
         jobs[resolution_id] = resolution
         persist_jobs_locked()
@@ -1320,6 +1541,10 @@ def health():
             "jobs_state": {
                 "path": str(JOBS_STATE_FILE),
                 "persisted": JOBS_STATE_FILE.is_file(),
+            },
+            "staging": {
+                "path": str(TEMP_DIR / "staging"),
+                "outside_library": not str(TEMP_DIR).startswith(str(MUSIC_ROOT)),
             },
             "ignored_tracks": {
                 "path": str(IGNORED_TRACKS_FILE),

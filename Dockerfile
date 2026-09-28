@@ -40,7 +40,8 @@ RUN rm -rf "$HOME" "$XDG_CACHE_HOME" "$DENO_DIR" \
     && mkdir -p "$HOME" "$XDG_CACHE_HOME" "$DENO_DIR" \
     && chmod 1777 "$HOME" "$XDG_CACHE_HOME" "$DENO_DIR"
 
-COPY app.py .
+COPY app.py staging.py ./
+COPY tools ./tools
 COPY templates ./templates
 
 EXPOSE 4545
