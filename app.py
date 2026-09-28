@@ -7,7 +7,8 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import Request, urlopen
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
@@ -252,6 +253,7 @@ def normalize_persisted_job(raw):
         "staging_owner_id": raw.get("staging_owner_id"),
         "source_title": raw.get("source_title"),
         "source_album_artist": raw.get("source_album_artist"),
+        "source_thumbnail": raw.get("source_thumbnail"),
         "metadata_artist": raw.get("metadata_artist"),
         "metadata_album": raw.get("metadata_album"),
         "staged_files": int(raw.get("staged_files") or 0),
@@ -575,6 +577,22 @@ def infer_album_artist(info):
     return normalize_topic_artist(top) or None
 
 
+def best_thumbnail_url(info):
+    value = str(info.get("thumbnail") or "").strip()
+    if value.startswith(("http://", "https://")):
+        return value
+
+    thumbnails = info.get("thumbnails") or []
+    if isinstance(thumbnails, list):
+        for item in reversed(thumbnails):
+            if not isinstance(item, dict):
+                continue
+            candidate = str(item.get("url") or "").strip()
+            if candidate.startswith(("http://", "https://")):
+                return candidate
+    return None
+
+
 def classify_probe_info(info, url=None):
     entries = info.get("entries")
     kind = (
@@ -602,6 +620,7 @@ def classify_probe_info(info, url=None):
         "extractor": extractor or None,
         "album_mode": album_mode,
         "album_artist": infer_album_artist(info) if album_mode else None,
+        "thumbnail": best_thumbnail_url(info),
     }
 
 
@@ -641,6 +660,45 @@ def probe_url(url):
         raise RuntimeError("yt-dlp returned invalid probe data") from exc
 
     result = classify_probe_info(info, url=url)
+    cache_probe_result(url, result)
+    return result
+
+
+def probe_spotify_url(url):
+    cached = get_cached_probe_result(url)
+    if cached:
+        return cached
+
+    spotify_type = spotify_link_type(url)
+    result = {
+        "kind": "spotify",
+        "title": f"Spotify {spotify_type}",
+        "count": None,
+        "extractor": "Spotify oEmbed",
+        "album_mode": spotify_type == "album",
+        "album_artist": None,
+        "thumbnail": None,
+    }
+
+    endpoint = "https://open.spotify.com/oembed?" + urlencode({"url": url})
+    try:
+        request_obj = Request(
+            endpoint,
+            headers={"User-Agent": "yt-dlp-server/1.0"},
+        )
+        with urlopen(request_obj, timeout=min(PROBE_TIMEOUT, 10)) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        title = str(payload.get("title") or "").strip()
+        thumbnail = str(payload.get("thumbnail_url") or "").strip()
+        if title:
+            result["title"] = title
+        if thumbnail.startswith(("http://", "https://")):
+            result["thumbnail"] = thumbnail
+    except Exception:
+        # oEmbed is a display enhancement only. Spotify downloads must not fail
+        # merely because the preview service is unavailable.
+        pass
+
     cache_probe_result(url, result)
     return result
 
@@ -1024,6 +1082,35 @@ def run_job(job_id):
             job["log"].append(f"ERROR: {exc}")
             persist_jobs_locked()
 
+def backfill_job_display_metadata():
+    with jobs_lock:
+        candidates = [
+            (job["id"], job["url"])
+            for job in jobs.values()
+            if job.get("source") == "spotify"
+            and not job.get("source_title")
+        ]
+
+    changed = False
+    for job_id, url in candidates:
+        result = probe_spotify_url(url)
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if not job:
+                continue
+            title = result.get("title")
+            thumbnail = result.get("thumbnail")
+            if title and title != f"Spotify {spotify_link_type(url)}":
+                job["source_title"] = title
+                changed = True
+            if thumbnail:
+                job["source_thumbnail"] = thumbnail
+                changed = True
+
+    if changed:
+        persist_jobs()
+
+
 def worker():
     while True:
         job_id = download_queue.get()
@@ -1059,6 +1146,11 @@ for restored_id in restored_queue_ids:
                 persist_jobs_locked()
 
 threading.Thread(target=worker, name="yt-dlp-worker", daemon=True).start()
+threading.Thread(
+    target=backfill_job_display_metadata,
+    name="job-display-metadata",
+    daemon=True,
+).start()
 
 
 def public_jobs():
@@ -1098,6 +1190,9 @@ def public_jobs():
                     if item.get("source") == "youtube" and item.get("ignored")
                 ),
                 "staging_owner_id": job.get("staging_owner_id"),
+                "source_title": job.get("source_title") or "",
+                "source_album_artist": job.get("source_album_artist") or "",
+                "source_thumbnail": job.get("source_thumbnail") or "",
                 "metadata_artist": job.get("metadata_artist") or "",
                 "metadata_album": job.get("metadata_album") or "",
                 "staged_files": job.get("staged_files", 0),
@@ -1131,10 +1226,14 @@ def download():
 
     source = "spotify" if is_spotify_url(url) else "yt-dlp"
     playlist_requested = request.form.get("playlist") == "on" if source == "yt-dlp" else False
-    probe_result = get_cached_probe_result(url) if source == "yt-dlp" else None
-    if source == "yt-dlp" and probe_result is None:
+    probe_result = get_cached_probe_result(url)
+    if probe_result is None:
         try:
-            probe_result = probe_url(url)
+            probe_result = (
+                probe_spotify_url(url)
+                if source == "spotify"
+                else probe_url(url)
+            )
         except (subprocess.TimeoutExpired, RuntimeError):
             probe_result = None
 
@@ -1202,6 +1301,7 @@ def download():
             if probe_result and album_mode
             else None
         ),
+        "source_thumbnail": probe_result.get("thumbnail") if probe_result else None,
         "metadata_artist": None,
         "metadata_album": None,
         "staged_files": 0,
@@ -1345,6 +1445,7 @@ def retry_job(job_id):
             "staging_owner_id": previous.get("staging_owner_id") or retry_id,
             "source_title": previous.get("source_title"),
             "source_album_artist": previous.get("source_album_artist"),
+            "source_thumbnail": previous.get("source_thumbnail"),
             "metadata_artist": previous.get("metadata_artist"),
             "metadata_album": previous.get("metadata_album"),
             "staged_files": previous.get("staged_files", 0),
@@ -1537,6 +1638,7 @@ def resolve_missing_spotify_track(job_id):
             "staging_owner_id": parent.get("staging_owner_id") or resolution_id,
             "source_title": parent.get("source_title"),
             "source_album_artist": parent.get("source_album_artist"),
+            "source_thumbnail": parent.get("source_thumbnail"),
             "metadata_artist": parent.get("metadata_artist"),
             "metadata_album": parent.get("metadata_album"),
             "staged_files": parent.get("staged_files", 0),
@@ -1565,16 +1667,11 @@ def api_probe():
         return jsonify({"ok": False, "error": error}), 400
 
     if is_spotify_url(url):
-        spotify_type = spotify_link_type(url)
+        result = probe_spotify_url(url)
         return jsonify({
             "ok": True,
-            "kind": "spotify",
-            "title": f"Spotify {spotify_type}",
-            "count": None,
-            "extractor": "spotDL",
-            "album_mode": spotify_type == "album",
-            "is_album": spotify_type == "album",
-            "album_artist": None,
+            **result,
+            "is_album": bool(result.get("album_mode")),
         })
 
     try:

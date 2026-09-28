@@ -39,7 +39,15 @@
     .jobs { display:grid; gap:10px; }
     .job { min-width:0; max-width:100%; overflow:hidden; background:var(--panel2); border:1px solid var(--line); border-radius:11px; padding:13px 14px; }
     .job-top { min-width:0; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; align-items:start; }
-    .job-url { min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#d9dde0; }
+    .job-release { min-width:0; display:grid; grid-template-columns:auto minmax(0,1fr); gap:10px; align-items:center; }
+    .job-cover { width:54px; height:54px; border-radius:7px; object-fit:contain; background:#0e1012; border:1px solid var(--line); }
+    .job-cover-placeholder { width:54px; height:54px; border-radius:7px; background:#171a1d; border:1px solid var(--line); display:grid; place-items:center; color:#5f666c; font-size:18px; }
+    .job-identity { min-width:0; }
+    .job-title { display:block; min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#eef1f3; font-weight:650; text-decoration:none; }
+    .job-title:hover { text-decoration:underline; }
+    .job-artist { min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:2px; color:#b9c0c5; font-size:12px; }
+    .job-source-link { display:inline-block; margin-top:3px; color:#7f8990; font-size:11px; text-decoration:none; }
+    .job-source-link:hover { color:#aab4bb; text-decoration:underline; }
     .status { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
     .status.succeeded { color:var(--good); } .status.failed { color:var(--bad); } .status.queued { color:var(--wait); } .status.running, .status.finalizing { color:#8ab4f8; } .status.needs_metadata { color:var(--wait); }
     .job-meta { min-width:0; max-width:100%; color:var(--muted); margin-top:7px; font-size:13px; overflow-wrap:anywhere; }
@@ -70,7 +78,7 @@
     details { min-width:0; max-width:100%; margin-top:9px; color:var(--muted); } summary { cursor:pointer; }
     pre { width:100%; min-width:0; max-width:100%; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; margin:8px 0 0; padding:10px; background:#0e1012; border-radius:8px; color:#b7bec4; font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; max-height:260px; overflow:auto; }
     .empty { color:var(--muted); padding:8px 0; }
-    @media (max-width:620px) { main{width:calc(100% - 20px);margin-top:16px}.panel{padding:14px}.url-row{grid-template-columns:minmax(0,1fr)}button{min-height:44px}.section-head{display:block}.versions{margin-bottom:10px}.track-progress-head{display:grid;grid-template-columns:1fr}.source-chip{white-space:normal}.resolver-row,.metadata-grid{grid-template-columns:minmax(0,1fr)} }
+    @media (max-width:620px) { main{width:calc(100% - 20px);margin-top:16px}.panel{padding:14px}.url-row{grid-template-columns:minmax(0,1fr)}button{min-height:44px}.section-head{display:block}.versions{margin-bottom:10px}.track-progress-head{display:grid;grid-template-columns:1fr}.source-chip{white-space:normal}.resolver-row,.metadata-grid{grid-template-columns:minmax(0,1fr)}.job-cover,.job-cover-placeholder{width:46px;height:46px}.job-top{gap:8px} }
   </style>
 </head>
 <body>
@@ -162,14 +170,65 @@
       card.dataset.jobId = job.id;
       const top = document.createElement("div");
       top.className = "job-top";
-      const url = document.createElement("div");
-      url.className = "job-url";
-      url.title = job.url;
-      url.textContent = job.url;
+
+      const release = document.createElement("div");
+      release.className = "job-release";
+
+      if (job.source_thumbnail) {
+        const cover = document.createElement("img");
+        cover.className = "job-cover";
+        cover.src = job.source_thumbnail;
+        cover.alt = "";
+        cover.loading = "lazy";
+        cover.referrerPolicy = "no-referrer";
+        release.appendChild(cover);
+      } else {
+        const cover = document.createElement("div");
+        cover.className = "job-cover-placeholder";
+        cover.textContent = "♪";
+        cover.setAttribute("aria-hidden", "true");
+        release.appendChild(cover);
+      }
+
+      const identity = document.createElement("div");
+      identity.className = "job-identity";
+
+      const title = document.createElement("a");
+      title.className = "job-title";
+      title.href = job.url;
+      title.target = "_blank";
+      title.rel = "noopener noreferrer";
+      title.title = job.url;
+      title.textContent =
+        job.metadata_album ||
+        job.source_title ||
+        (job.source === "spotify" ? "Spotify album" : "Untitled source");
+
+      identity.appendChild(title);
+
+      const artistName = job.metadata_artist || job.source_album_artist || "";
+      if (artistName) {
+        const artist = document.createElement("div");
+        artist.className = "job-artist";
+        artist.textContent = artistName;
+        identity.appendChild(artist);
+      }
+
+      const sourceLink = document.createElement("a");
+      sourceLink.className = "job-source-link";
+      sourceLink.href = job.url;
+      sourceLink.target = "_blank";
+      sourceLink.rel = "noopener noreferrer";
+      sourceLink.textContent = "Open source";
+      sourceLink.title = job.url;
+      identity.appendChild(sourceLink);
+
+      release.appendChild(identity);
+
       const status = document.createElement("div");
       status.className = "status " + job.status;
       status.textContent = job.status.replaceAll("_", " ");
-      top.append(url, status);
+      top.append(release, status);
       card.appendChild(top);
       const meta = document.createElement("div");
       meta.className = "job-meta";
