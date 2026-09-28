@@ -509,16 +509,14 @@
             });
             const data = await response.json();
             if (!response.ok || !data.ok) {
+              remove.disabled = false;
               remove.textContent = data.error || "Could not remove job";
               return;
             }
             await refreshJobs(true);
           } catch (_) {
+            remove.disabled = false;
             remove.textContent = "Could not remove job";
-          } finally {
-            if (document.body.contains(remove) && !remove.disabled) {
-              remove.textContent = originalText;
-            }
           }
         });
 
