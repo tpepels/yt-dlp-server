@@ -222,6 +222,7 @@ def normalize_persisted_job(raw):
         "id": job_id,
         "url": str(raw["url"]),
         "playlist": bool(raw.get("playlist", False)),
+        "collection_mode": bool(raw.get("collection_mode", raw.get("playlist", False))),
         "album_mode": bool(raw.get("album_mode", False)),
         "compilation": bool(raw.get("compilation", False)),
         "force": bool(raw.get("force", False)),
@@ -1122,14 +1123,28 @@ def download():
         ), 400
 
     source = "spotify" if is_spotify_url(url) else "yt-dlp"
-    playlist_enabled = request.form.get("playlist") == "on" if source == "yt-dlp" else False
-    album_mode = source == "yt-dlp" and playlist_enabled and is_youtube_album_playlist(url)
+    playlist_requested = request.form.get("playlist") == "on" if source == "yt-dlp" else False
     probe_result = get_cached_probe_result(url) if source == "yt-dlp" else None
-    if album_mode and probe_result is None:
+    if source == "yt-dlp" and probe_result is None:
         try:
             probe_result = probe_url(url)
         except (subprocess.TimeoutExpired, RuntimeError):
             probe_result = None
+
+    detected_collection = bool(
+        probe_result and probe_result.get("kind") == "playlist"
+    )
+    playlist_enabled = bool(
+        source == "yt-dlp"
+        and playlist_requested
+        and (detected_collection if probe_result else True)
+    )
+    collection_mode = bool(playlist_enabled and detected_collection)
+    album_mode = bool(
+        source == "yt-dlp"
+        and collection_mode
+        and is_youtube_album_playlist(url)
+    )
 
     compilation = bool(
         probe_result
@@ -1146,6 +1161,7 @@ def download():
         "id": job_id,
         "url": url,
         "playlist": playlist_enabled,
+        "collection_mode": collection_mode,
         "album_mode": album_mode,
         "compilation": compilation,
         "force": request.form.get("force") == "on",
@@ -1230,6 +1246,7 @@ def retry_job(job_id):
             "id": retry_id,
             "url": previous["url"],
             "playlist": previous["playlist"],
+            "collection_mode": previous.get("collection_mode", previous["playlist"]),
             "album_mode": previous["album_mode"],
             "compilation": previous["compilation"],
             # A retry is a continuation: never overwrite files that already succeeded.
@@ -1426,6 +1443,7 @@ def resolve_missing_spotify_track(job_id):
             "id": resolution_id,
             "url": spotify_url,
             "playlist": False,
+            "collection_mode": False,
             "album_mode": False,
             "compilation": False,
             "force": False,
