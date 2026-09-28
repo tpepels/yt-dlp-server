@@ -86,6 +86,33 @@ jobs:
           assert public["source_title"] == "Visible Album", public
           assert public["source_album_artist"] == "Visible Artist", public
           assert public["source_thumbnail"] == "https://example.invalid/art.jpg", public
+
+          # Existing Spotify jobs are backfilled asynchronously from oEmbed.
+          app.jobs.clear()
+          spotify = app.normalize_persisted_job({
+              "id": "spotify-old",
+              "url": "https://open.spotify.com/album/abc123",
+              "status": "failed",
+              "source": "spotify",
+          })
+          app.jobs[spotify["id"]] = spotify
+          real_probe = app.probe_spotify_url
+          app.probe_spotify_url = lambda url: {
+              "kind": "spotify",
+              "title": "The Book of Sounds",
+              "count": None,
+              "extractor": "Spotify oEmbed",
+              "album_mode": True,
+              "album_artist": None,
+              "thumbnail": "https://example.invalid/spotify.jpg",
+          }
+          try:
+              app.backfill_job_display_metadata()
+          finally:
+              app.probe_spotify_url = real_probe
+          public = app.public_jobs()[0]
+          assert public["source_title"] == "The Book of Sounds", public
+          assert public["source_thumbnail"] == "https://example.invalid/spotify.jpg", public
           PY
       - name: Validate album grouping and item progress
         run: |
