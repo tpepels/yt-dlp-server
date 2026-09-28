@@ -543,12 +543,15 @@ def infer_album_artist(info):
     for entry in info.get("entries") or []:
         if not isinstance(entry, dict):
             continue
-        value = (
-            entry.get("artist")
-            or entry.get("album_artist")
-            or entry.get("uploader")
-            or entry.get("channel")
-        )
+
+        value = entry.get("album_artist") or entry.get("artist")
+        if not value:
+            for key in ("uploader", "channel"):
+                raw = str(entry.get(key) or "").strip()
+                if re.search(r"\s+-\s+Topic$", raw, flags=re.IGNORECASE):
+                    value = raw
+                    break
+
         value = normalize_topic_artist(value)
         if value:
             artists.add(value)
@@ -558,11 +561,14 @@ def infer_album_artist(info):
     if len(artists) == 1:
         return next(iter(artists))
 
-    return normalize_topic_artist(
-        info.get("album_artist")
-        or info.get("uploader")
-        or info.get("channel")
-    ) or None
+    top = info.get("album_artist") or info.get("artist")
+    if not top:
+        for key in ("uploader", "channel"):
+            raw = str(info.get(key) or "").strip()
+            if re.search(r"\s+-\s+Topic$", raw, flags=re.IGNORECASE):
+                top = raw
+                break
+    return normalize_topic_artist(top) or None
 
 
 def classify_probe_info(info, url=None):
@@ -1017,6 +1023,18 @@ def worker():
 
 
 restored_queue_ids = load_persisted_jobs()
+
+with jobs_lock:
+    restored_finalize_ids = [
+        job["id"]
+        for job in jobs.values()
+        if job.get("status") == "succeeded"
+        and library_staging.media_files(library_staging.stage_dir(TEMP_DIR, job))
+    ]
+
+for restored_id in restored_finalize_ids:
+    finalize_staged_job(restored_id)
+
 for restored_id in restored_queue_ids:
     try:
         download_queue.put_nowait(restored_id)
@@ -1103,7 +1121,7 @@ def download():
     source = "spotify" if is_spotify_url(url) else "yt-dlp"
     playlist_enabled = request.form.get("playlist") == "on" if source == "yt-dlp" else False
     album_mode = source == "yt-dlp" and playlist_enabled and is_youtube_album_playlist(url)
-    probe_result = get_cached_probe_result(url) if album_mode else None
+    probe_result = get_cached_probe_result(url) if source == "yt-dlp" else None
     if album_mode and probe_result is None:
         try:
             probe_result = probe_url(url)
