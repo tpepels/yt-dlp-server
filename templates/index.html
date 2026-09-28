@@ -40,7 +40,7 @@
     .job-top { min-width:0; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; align-items:start; }
     .job-url { min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#d9dde0; }
     .status { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
-    .status.succeeded { color:var(--good); } .status.failed { color:var(--bad); } .status.queued { color:var(--wait); } .status.running { color:#8ab4f8; }
+    .status.succeeded { color:var(--good); } .status.failed { color:var(--bad); } .status.queued { color:var(--wait); } .status.running, .status.finalizing { color:#8ab4f8; } .status.needs_metadata { color:var(--wait); }
     .job-meta { min-width:0; max-width:100%; color:var(--muted); margin-top:7px; font-size:13px; overflow-wrap:anywhere; }
     .track-progress { min-width:0; max-width:100%; margin-top:10px; }
     .track-progress-head { min-width:0; display:flex; flex-wrap:wrap; justify-content:space-between; gap:4px 12px; margin-bottom:5px; color:var(--muted); font-size:12px; }
@@ -58,10 +58,16 @@
     .resolver-row button { min-height:36px; padding:7px 11px; font-size:12px; }
     .resolver-error { margin-top:6px; color:var(--bad); font-size:11px; overflow-wrap:anywhere; }
     .ignore-button { min-height:34px; margin-top:8px; padding:7px 11px; background:#d9c7a5; font-size:12px; }
+    .metadata-review { margin-top:11px; padding:12px; border:1px solid #665c36; border-radius:10px; background:#1d1b14; }
+    .metadata-title { font-size:13px; font-weight:700; color:#f0dca0; }
+    .metadata-note { margin-top:3px; color:var(--muted); font-size:12px; }
+    .metadata-grid { display:grid; grid-template-columns:1fr 1fr auto; gap:8px; margin-top:9px; }
+    .metadata-grid input { width:100%; min-width:0; border:1px solid var(--line); border-radius:8px; background:#0e1012; color:var(--text); padding:9px 10px; font:12px/1.3 inherit; }
+    .metadata-grid button { min-height:36px; padding:7px 12px; font-size:12px; }
     details { min-width:0; max-width:100%; margin-top:9px; color:var(--muted); } summary { cursor:pointer; }
     pre { width:100%; min-width:0; max-width:100%; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; margin:8px 0 0; padding:10px; background:#0e1012; border-radius:8px; color:#b7bec4; font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; max-height:260px; overflow:auto; }
     .empty { color:var(--muted); padding:8px 0; }
-    @media (max-width:620px) { main{width:calc(100% - 20px);margin-top:16px}.panel{padding:14px}.url-row{grid-template-columns:minmax(0,1fr)}button{min-height:44px}.section-head{display:block}.versions{margin-bottom:10px}.track-progress-head{display:grid;grid-template-columns:1fr}.source-chip{white-space:normal}.resolver-row{grid-template-columns:minmax(0,1fr)} }
+    @media (max-width:620px) { main{width:calc(100% - 20px);margin-top:16px}.panel{padding:14px}.url-row{grid-template-columns:minmax(0,1fr)}button{min-height:44px}.section-head{display:block}.versions{margin-bottom:10px}.track-progress-head{display:grid;grid-template-columns:1fr}.source-chip{white-space:normal}.resolver-row,.metadata-grid{grid-template-columns:minmax(0,1fr)} }
   </style>
 </head>
 <body>
@@ -81,7 +87,7 @@
         <label><input type="checkbox" name="force"> Ignore archive and overwrite existing file</label>
       </div>
     </form>
-    <div class="path">Library target: {{ import_root }}/Artist/Album/Track</div>
+    <div class="path">Staging first: /data/tmp/staging · Library publish only after completion + metadata validation: {{ import_root }}/Artist/Album/Track</div>
     <div class="sources">
       <div class="sources-title">Supported sources</div>
       <div class="source-chips" aria-label="Example supported sites">
@@ -159,7 +165,7 @@
       url.textContent = job.url;
       const status = document.createElement("div");
       status.className = "status " + job.status;
-      status.textContent = job.status;
+      status.textContent = job.status.replaceAll("_", " ");
       top.append(url, status);
       card.appendChild(top);
       const meta = document.createElement("div");
@@ -169,6 +175,7 @@
       if (job.source === "spotify") bits.push("Spotify / spotDL");
       else if (job.playlist) bits.push("playlist");
       if (job.attempt > 1) bits.push("attempt " + job.attempt);
+      if (job.final_dir) bits.push(job.final_dir);
       meta.textContent = bits.filter(Boolean).join(" · ");
       card.appendChild(meta);
 
@@ -199,6 +206,92 @@
 
         progress.append(head, bar);
         card.appendChild(progress);
+      }
+
+      if (job.status === "needs_metadata") {
+        const review = document.createElement("div");
+        review.className = "metadata-review";
+
+        const title = document.createElement("div");
+        title.className = "metadata-title";
+        title.textContent = "Metadata required before library import";
+
+        const note = document.createElement("div");
+        note.className = "metadata-note";
+        note.textContent = "Nothing has been moved into the library yet. Confirm the collection metadata, then publish it.";
+
+        const grid = document.createElement("div");
+        grid.className = "metadata-grid";
+
+        const artist = document.createElement("input");
+        artist.type = "text";
+        artist.className = "metadata-input";
+        artist.placeholder = "Artist / album artist";
+        artist.value = job.metadata_artist || "";
+        artist.autocomplete = "off";
+
+        const album = document.createElement("input");
+        album.type = "text";
+        album.className = "metadata-input";
+        album.placeholder = "Album";
+        album.value = job.metadata_album || "";
+        album.autocomplete = "off";
+
+        const publish = document.createElement("button");
+        publish.type = "button";
+        publish.textContent = "Move to library";
+
+        const error = document.createElement("div");
+        error.className = "resolver-error";
+
+        publish.addEventListener("click", async () => {
+          error.textContent = "";
+          if (!artist.value.trim()) {
+            error.textContent = "Artist / album artist is required.";
+            artist.focus();
+            return;
+          }
+          if (!album.value.trim()) {
+            error.textContent = "Album name is required.";
+            album.focus();
+            return;
+          }
+
+          publish.disabled = true;
+          artist.disabled = true;
+          album.disabled = true;
+          publish.textContent = "Publishing…";
+          try {
+            const response = await fetch("/api/jobs/" + encodeURIComponent(job.id) + "/metadata", {
+              method: "POST",
+              headers: {"Content-Type": "application/json", "Accept": "application/json"},
+              body: JSON.stringify({
+                artist: artist.value.trim(),
+                album: album.value.trim(),
+              }),
+            });
+            const data = await response.json();
+            if (!response.ok || !data.ok) {
+              error.textContent = data.error || "Could not publish album.";
+              publish.disabled = false;
+              artist.disabled = false;
+              album.disabled = false;
+              publish.textContent = "Move to library";
+              return;
+            }
+            await refreshJobs(true);
+          } catch (_) {
+            error.textContent = "Could not publish album.";
+            publish.disabled = false;
+            artist.disabled = false;
+            album.disabled = false;
+            publish.textContent = "Move to library";
+          }
+        });
+
+        grid.append(artist, album, publish);
+        review.append(title, note, grid, error);
+        card.appendChild(review);
       }
 
       if (job.status === "failed" && job.source === "yt-dlp" && job.missing_tracks && job.missing_tracks.length) {
@@ -511,7 +604,8 @@
 
   renderJobs(initialJobs);
 
-  async function refreshJobs() {
+  async function refreshJobs(force = false) {
+    if (!force && document.activeElement && document.activeElement.matches("#jobs input")) return;
     try {
       const response = await fetch("/api/jobs", {cache:"no-store"});
       if (response.ok) renderJobs(await response.json());
