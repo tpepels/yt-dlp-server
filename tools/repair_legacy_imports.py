@@ -42,17 +42,21 @@ def under(path, root):
         return False
 
 
-def probe_playlist(url):
+def probe_source(url, is_playlist):
+    command = [
+        "yt-dlp",
+        "--dump-single-json",
+        "--skip-download",
+        "--no-warnings",
+    ]
+    if is_playlist:
+        command.extend(["--flat-playlist", "--yes-playlist"])
+    else:
+        command.append("--no-playlist")
+    command.append(url)
+
     completed = subprocess.run(
-        [
-            "yt-dlp",
-            "--flat-playlist",
-            "--dump-single-json",
-            "--skip-download",
-            "--no-warnings",
-            "--yes-playlist",
-            url,
-        ],
+        command,
         capture_output=True,
         text=True,
         check=False,
@@ -66,12 +70,15 @@ def probe_playlist(url):
         raise RuntimeError("yt-dlp returned invalid metadata JSON") from exc
 
 
-def collection_metadata(info):
-    album = staging.clean_album_name(
-        info.get("title")
-        or info.get("playlist_title")
-        or info.get("playlist")
-    )
+def collection_metadata(info, is_playlist):
+    if is_playlist:
+        album = staging.clean_album_name(
+            info.get("title")
+            or info.get("playlist_title")
+            or info.get("playlist")
+        )
+    else:
+        album = staging.clean_album_name(info.get("album"))
 
     entries = [
         entry for entry in (info.get("entries") or [])
@@ -111,8 +118,6 @@ def collect_groups(jobs, import_root, only_url=None):
     for job in jobs:
         if job.get("source", "yt-dlp") != "yt-dlp":
             continue
-        if not job.get("playlist"):
-            continue
         url = str(job.get("url") or "").strip()
         if not url or (only_url and url != only_url):
             continue
@@ -126,8 +131,12 @@ def collect_groups(jobs, import_root, only_url=None):
         if not existing:
             continue
 
-        group = groups.setdefault(url, {"paths": {}, "attempts": 0})
+        group = groups.setdefault(
+            url,
+            {"paths": {}, "attempts": 0, "playlist": bool(job.get("playlist"))},
+        )
         group["attempts"] += 1
+        group["playlist"] = group["playlist"] or bool(job.get("playlist"))
         for path in existing:
             source_id = staging.source_id_from_filename(path)
             key = source_id or str(path.resolve())
@@ -262,11 +271,17 @@ def main():
     for url, group in sorted(groups.items()):
         paths = sorted(group["paths"].values())
         print(f"\n{url}")
-        print(f"  existing files: {len(paths)} from {group['attempts']} recorded attempt(s)")
+        kind = "playlist" if group["playlist"] else "single item"
+        print(
+            f"  existing files: {len(paths)} from {group['attempts']} "
+            f"recorded attempt(s) ({kind})"
+        )
 
         try:
-            info = probe_playlist(url)
-            album_artist, album, per_track = collection_metadata(info)
+            info = probe_source(url, group["playlist"])
+            album_artist, album, per_track = collection_metadata(
+                info, group["playlist"]
+            )
         except Exception as exc:
             print(f"  UNRESOLVED: metadata probe failed: {exc}")
             unresolved += 1
