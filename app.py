@@ -609,6 +609,10 @@ def best_thumbnail_url(info):
                     candidate = str(item.get("url") or "").strip()
                     if candidate.startswith(("http://", "https://")):
                         return candidate
+
+            video_id = str(entry.get("id") or "").strip()
+            if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
     return None
 
 
@@ -1292,7 +1296,7 @@ def public_job_from_group_locked(root_id, members):
         "attempt_count": len(primary),
         "attempt_history": attempt_history,
         "active_resolution_tracks": active_resolutions,
-        "url": first_value("url") or representative["url"],
+        "url": representative["url"],
         "status": representative["status"],
         "message": representative["message"],
         "progress": representative["progress"],
@@ -1305,7 +1309,7 @@ def public_job_from_group_locked(root_id, members):
         "completed_items": representative["completed_items"],
         "files": list(representative["files"]),
         "log": list(representative["log"]),
-        "created_at": min(item["created_at"] for item in members),
+        "created_at": max(item["created_at"] for item in members),
         "started_at": representative["started_at"],
         "finished_at": representative["finished_at"],
         "returncode": representative["returncode"],
