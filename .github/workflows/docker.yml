@@ -733,6 +733,82 @@ jobs:
             -e STATE_DIR=/tmp/state \
             -e TEMP_DIR=/tmp/work \
             yt-dlp-server:test python -c 'import queue, app; u="https://open.spotify.com/album/4yP0hdKOZPNshxUOjY0cZj"; assert app.is_spotify_url(u); assert app.spotify_link_type(u)=="album"; j={"id":"sp1","staging_owner_id":"sp1","url":u,"force":False,"download_query":None}; cmd=app.build_spotdl_command(j); assert cmd[:3]==["spotdl","download",u]; ai=cmd.index("--audio"); assert cmd[ai+1:ai+5]==["youtube-music","youtube","bandcamp","soundcloud"]; assert "--archive" in cmd and str(app.SPOTDL_ARCHIVE_FILE) in cmd; assert "--format" in cmd and "opus" in cmd; assert "--bitrate" in cmd and "disable" in cmd; assert app.library_staging.staged_spotdl_output_template(app.TEMP_DIR, j).endswith("{track-number} - {title} [{track-id}].{output-ext}"); assert "/tmp/work/staging/sp1/" in app.library_staging.staged_spotdl_output_template(app.TEMP_DIR, j); assert "youtube:player_client=mweb" in app.spotdl_ytdlp_args(); assert "youtubepot-bgutilscript:server_home=" in app.spotdl_ytdlp_args(); force=app.build_spotdl_command({"id":"sp2","staging_owner_id":"sp2","url":u,"force":True}); assert "--archive" not in force; assert force[force.index("--overwrite")+1]=="force"; app.jobs.clear(); app.jobs["sp"]={"id":"sp","source":"spotify","completed_items":0,"total_items":0,"current_item":0,"retry_base_completed":0,"message":"","progress":"","files":[],"log":[],"http_403":False}; app.append_log("sp","INFO: 1/8 complete"); assert app.jobs["sp"]["total_items"]==8 and app.jobs["sp"]["current_item"]==1; app.append_log("sp", "INFO: Downloaded \"Artist - Track\": https://youtube.com/watch?v=x"); assert app.jobs["sp"]["completed_items"]==1; err="https://open.spotify.com/track/4EIGit0b2tPnfp4jPdrtKZ - LookupError: No results found for song: GAS - Pop 3"; missing=app.extract_spotdl_missing_tracks([err]); assert missing==[{"spotify_url":"https://open.spotify.com/track/4EIGit0b2tPnfp4jPdrtKZ","label":"GAS - Pop 3","resolved":False,"source_url":None}]; assert app.is_manual_spotify_source_url("https://kompakt-gas.bandcamp.com/track/pop-3"); assert app.is_manual_spotify_source_url("https://www.youtube.com/watch?v=abc123"); assert not app.is_manual_spotify_source_url("https://example.com/audio"); app.download_queue=queue.Queue(maxsize=5); app.jobs.clear(); app.jobs["parent"]={"id":"parent","source":"spotify","status":"failed","missing_tracks":missing,"total_items":7,"completed_items":6,"current_item":7,"progress":"","failed_items":1,"log":[]}; client=app.app.test_client(); rr=client.post("/api/jobs/parent/resolve", json={"spotify_url":missing[0]["spotify_url"],"source_url":"https://kompakt-gas.bandcamp.com/track/pop-3"}); assert rr.status_code==202, rr.data; child=app.jobs[rr.get_json()["job_id"]]; assert child["download_query"]=="https://kompakt-gas.bandcamp.com/track/pop-3|https://open.spotify.com/track/4EIGit0b2tPnfp4jPdrtKZ"; assert child["resolution_of"]=="parent"; child["completed_items"]=1; app.apply_manual_resolution_success(child); assert app.jobs["parent"]["status"]=="succeeded"; assert app.jobs["parent"]["completed_items"]==7; assert app.jobs["parent"]["missing_tracks"][0]["resolved"] is True; p=client.post("/api/probe", json={"url":u}); assert p.status_code==200 and p.get_json()["kind"]=="spotify" and p.get_json()["is_album"] is True; t=client.post("/api/probe", json={"url":"https://open.spotify.com/track/4EIGit0b2tPnfp4jPdrtKZ"}); assert t.status_code==200 and t.get_json()["kind"]=="spotify" and t.get_json()["is_album"] is False'
+      - name: Validate Monochrome fallback track endpoint
+        run: |
+          docker run --rm --user 1000:1000 \
+            -e MUSIC_ROOT=/tmp/music \
+            -e STATE_DIR=/tmp/state \
+            -e TEMP_DIR=/tmp/work \
+            yt-dlp-server:test python - <<'PY'
+          import pathlib
+          import subprocess
+
+          from mutagen.oggopus import OggOpus
+
+          import app
+
+          cmd = app.build_fallback_track_command(
+              "Test Artist - Test Track",
+              "/tmp/work/fallback/test",
+          )
+          assert cmd[:3] == ["spotdl", "download", "Test Artist - Test Track"], cmd
+          ai = cmd.index("--audio")
+          assert cmd[ai + 1:ai + 5] == [
+              "youtube-music", "youtube", "bandcamp", "soundcloud"
+          ], cmd
+          assert "--archive" not in cmd, cmd
+          assert cmd[cmd.index("--overwrite") + 1] == "force", cmd
+
+          real_run = app.subprocess.run
+
+          class Done:
+              returncode = 0
+              stdout = "Downloaded test fallback"
+
+          def fake_run(command, **kwargs):
+              output_template = command[command.index("--output") + 1]
+              target = pathlib.Path(
+                  output_template
+                  .replace("{title}", "Test Track")
+                  .replace("{output-ext}", "opus")
+              )
+              target.parent.mkdir(parents=True, exist_ok=True)
+              real_run([
+                  "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                  "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2",
+                  "-c:a", "libopus", str(target),
+              ], check=True)
+              audio = OggOpus(target)
+              audio["title"] = ["Test Track"]
+              audio["artist"] = ["Test Artist"]
+              audio.save()
+              return Done()
+
+          app.subprocess.run = fake_run
+          try:
+              client = app.app.test_client()
+              response = client.post(
+                  "/api/fallback-track",
+                  json={
+                      "artist": "Test Artist",
+                      "title": "Test Track",
+                      "album": "Test Album",
+                  },
+              )
+          finally:
+              app.subprocess.run = real_run
+
+          assert response.status_code == 200, response.data
+          assert response.headers["X-Fallback-Provider"] == "spotdl"
+          assert response.headers["X-Fallback-Query"] == "Test Artist - Test Track"
+          assert response.data[:4] == b"OggS", response.data[:16]
+
+          bad = client.post(
+              "/api/fallback-track",
+              json={"artist": "", "title": "Missing"},
+          )
+          assert bad.status_code == 400, bad.data
+          PY
       - name: Validate YouTube PO-token command wiring
         run: |
           docker run --rm --user 1000:1000 \
