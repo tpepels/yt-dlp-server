@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask import Flask, jsonify, redirect, render_template, request, send_file, url_for
 
 import staging as library_staging
 
@@ -39,6 +39,7 @@ ARCHIVE_FILE = STATE_DIR / "archive.txt"
 SPOTDL_ARCHIVE_FILE = STATE_DIR / "spotdl-archive.txt"
 JOBS_STATE_FILE = STATE_DIR / "jobs.json"
 IGNORED_TRACKS_FILE = STATE_DIR / "ignored-tracks.json"
+CHROME_EXTENSION_ZIP = Path(app.root_path) / "dist" / "yt-dlp-server-chrome-extension-v1.0.0.zip"
 
 for directory in (IMPORT_ROOT, STATE_DIR, TEMP_DIR):
     directory.mkdir(parents=True, exist_ok=True)
@@ -1352,6 +1353,20 @@ def public_jobs():
         ]
         public.sort(key=lambda item: item["created_at"], reverse=True)
         return public
+
+
+@app.get("/chrome-extension.zip")
+def download_chrome_extension():
+    if not CHROME_EXTENSION_ZIP.is_file():
+        return jsonify({"ok": False, "error": "Chrome extension package is unavailable."}), 404
+
+    return send_file(
+        CHROME_EXTENSION_ZIP,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=CHROME_EXTENSION_ZIP.name,
+        max_age=0,
+    )
 
 
 @app.get("/")
