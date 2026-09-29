@@ -53,7 +53,7 @@
     .job-source-link { display:inline-block; margin-top:3px; color:#7f8990; font-size:11px; text-decoration:none; }
     .job-source-link:hover { color:#aab4bb; text-decoration:underline; }
     .status { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
-    .status.succeeded { color:var(--good); } .status.failed { color:var(--bad); } .status.queued { color:var(--wait); } .status.running, .status.finalizing { color:#8ab4f8; } .status.needs_metadata { color:var(--wait); }
+    .status.succeeded { color:var(--good); } .status.partial { color:var(--wait); } .status.failed { color:var(--bad); } .status.queued { color:var(--wait); } .status.running, .status.finalizing { color:#8ab4f8; } .status.needs_metadata { color:var(--wait); }
     .job-meta { min-width:0; max-width:100%; color:var(--muted); margin-top:7px; font-size:13px; overflow-wrap:anywhere; }
     .track-progress { min-width:0; max-width:100%; margin-top:10px; }
     .track-progress-head { min-width:0; display:flex; flex-wrap:wrap; justify-content:space-between; gap:4px 12px; margin-bottom:5px; color:var(--muted); font-size:12px; }
@@ -413,7 +413,7 @@
         if (missingWrap.childElementCount) card.appendChild(missingWrap);
       }
 
-      if (job.status === "failed" && !retriedParents.has(job.id) && job.source === "spotify" && job.missing_tracks && job.missing_tracks.length) {
+      if (["failed", "partial"].includes(job.status) && !retriedParents.has(job.id) && job.source === "spotify" && job.missing_tracks && job.missing_tracks.length) {
         const missingWrap = document.createElement("div");
         missingWrap.className = "missing-tracks";
 
@@ -498,7 +498,7 @@
         if (missingWrap.childElementCount) card.appendChild(missingWrap);
       }
 
-      if (job.status === "failed") {
+      if (["failed", "partial"].includes(job.status)) {
         const actions = document.createElement("div");
         actions.className = "job-actions";
 
@@ -506,7 +506,7 @@
         retry.type = "button";
         retry.className = "retry-button";
         retry.textContent = job.source === "spotify" && job.missing_tracks && job.missing_tracks.length
-          ? "Retry automatic search"
+          ? "Retry failed tracks"
           : "Retry / continue";
         retry.addEventListener("click", async () => {
           retry.disabled = true;
@@ -538,14 +538,14 @@
         card.appendChild(actions);
       }
 
-      if (["failed", "succeeded", "needs_metadata"].includes(job.status)) {
+      if (["failed", "partial", "succeeded", "needs_metadata"].includes(job.status)) {
         const removeActions = document.createElement("div");
         removeActions.className = "job-actions";
 
         const remove = document.createElement("button");
         remove.type = "button";
         remove.className = "remove-button";
-        const destructive = job.status !== "succeeded";
+        const destructive = !["succeeded", "partial"].includes(job.status);
         remove.textContent = destructive ? "Discard" : "Remove from list";
 
         remove.addEventListener("click", async () => {
