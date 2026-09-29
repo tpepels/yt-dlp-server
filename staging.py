@@ -381,7 +381,111 @@ def discard_stage(temp_dir, job):
     return path
 
 
+def publish_spotdl_stage(temp_dir, import_root, job):
+    """Publish successful spotDL files while preserving their native album tree."""
+    stage = stage_dir(temp_dir, job)
+    files = media_files(stage)
+    if not files:
+        return {
+            "status": "error",
+            "message": "No staged audio files were found.",
+            "artist": "",
+            "album": "",
+            "records": [],
+            "info_count": 0,
+            "media_count": 0,
+            "stage_dir": str(stage),
+            "needs_metadata": False,
+        }
+
+    import_root = Path(import_root)
+    import_root.mkdir(parents=True, exist_ok=True)
+    incoming_parent = import_root / ".incoming"
+    incoming_parent.mkdir(parents=True, exist_ok=True)
+    incoming = incoming_parent / f"{staging_owner_id(job)}-{uuid.uuid4().hex[:8]}"
+    incoming.mkdir(parents=True, exist_ok=False)
+
+    prepared = []
+    try:
+        for source in files:
+            source = Path(source)
+            rel = source.relative_to(stage)
+            if len(rel.parts) < 3:
+                raise RuntimeError(
+                    f"Spotify staged path is missing Artist/Album folders: {rel}"
+                )
+
+            artist = clean_artist_name(rel.parts[0])
+            album = clean_album_name(rel.parts[1])
+            if not artist or not album:
+                raise RuntimeError(
+                    f"Spotify staged path has unresolved Artist/Album metadata: {rel}"
+                )
+
+            destination = (
+                incoming
+                / safe_component(artist)
+                / safe_component(album)
+                / source.name
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            prepared.append(destination)
+
+        final_files = []
+        final_dirs = set()
+        for source in prepared:
+            rel = source.relative_to(incoming)
+            destination = import_root / rel
+            destination.parent.mkdir(parents=True, exist_ok=True)
+
+            if destination.exists():
+                if job.get("force"):
+                    destination.unlink()
+                else:
+                    source.unlink()
+                    final_files.append(str(destination))
+                    final_dirs.add(str(destination.parent))
+                    continue
+
+            os.replace(source, destination)
+            final_files.append(str(destination))
+            final_dirs.add(str(destination.parent))
+
+        shutil.rmtree(incoming, ignore_errors=True)
+        shutil.rmtree(stage, ignore_errors=True)
+
+        try:
+            if incoming_parent.is_dir() and not any(incoming_parent.iterdir()):
+                incoming_parent.rmdir()
+        except OSError:
+            pass
+
+        ordered_dirs = sorted(final_dirs)
+        return {
+            "status": "published",
+            "message": (
+                f"Published {len(final_files)} file(s) across "
+                f"{len(ordered_dirs)} album folder(s)"
+            ),
+            "artist": "",
+            "album": "",
+            "final_dir": ordered_dirs[0] if len(ordered_dirs) == 1 else str(import_root),
+            "final_dirs": ordered_dirs,
+            "files": final_files,
+            "media_count": len(final_files),
+            "stage_dir": str(stage),
+            "needs_metadata": False,
+        }
+    except Exception:
+        shutil.rmtree(incoming, ignore_errors=True)
+        raise
+
+
 def publish_stage(temp_dir, import_root, job, artist=None, album=None):
+    if job.get("source") == "spotify":
+        return publish_spotdl_stage(temp_dir, import_root, job)
+
     analysis = analyze_stage(temp_dir, job)
     artist = clean_artist_name(artist or analysis["artist"])
     album = clean_album_name(album or analysis["album"])
