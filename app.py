@@ -101,7 +101,7 @@ def schedule_library_change_nudge(delay=None):
     global library_nudge_timer
 
     seconds = PLEX_RESCAN_NUDGE_SECONDS if delay is None else float(delay)
-    if seconds < 0:
+    if seconds <= 0:
         return
 
     with library_nudge_lock:
