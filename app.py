@@ -248,6 +248,7 @@ def normalize_persisted_job(raw):
         "source": source,
         "retry_base_completed": int(retry_base_completed),
         "failed_items": int(raw.get("failed_items") or 0),
+        "unidentified_failed_items": int(raw.get("unidentified_failed_items") or 0),
         "missing_tracks": list(raw.get("missing_tracks") or []),
         "resolution_of": raw.get("resolution_of"),
         "spotify_track_url": raw.get("spotify_track_url"),
@@ -445,7 +446,7 @@ def extract_spotdl_missing_tracks(errors):
             if "No results found for song:" in error:
                 label = error.split("No results found for song:", 1)[1].strip()
             else:
-                label = error.strip()
+                label = error.replace(spotify_url, "", 1).strip(" -:")[:240]
 
             missing.append({
                 "spotify_url": spotify_url,
@@ -486,12 +487,29 @@ def apply_manual_resolution_success(job):
     if not parent:
         return
 
+    newly_resolved = False
     for missing in parent.get("missing_tracks", []):
         if missing.get("spotify_url") == spotify_url:
+            newly_resolved = not missing.get("resolved")
             missing["resolved"] = True
             missing["source_url"] = source_url
 
-    unresolved = [item for item in parent.get("missing_tracks", []) if not item.get("resolved")]
+    unresolved = [
+        item for item in parent.get("missing_tracks", [])
+        if not item.get("resolved")
+    ]
+    if newly_resolved:
+        parent["completed_items"] += 1
+        if parent.get("total_items"):
+            parent["completed_items"] = min(
+                parent["completed_items"],
+                parent["total_items"],
+            )
+        parent["failed_items"] = len(unresolved)
+        parent["unidentified_failed_items"] = 0
+        parent["log"].append(f"Resolved {spotify_url} from {source_url}")
+        parent["log"] = parent["log"][-40:]
+
     if not unresolved and parent.get("missing_tracks"):
         parent["status"] = "succeeded"
         parent["failed_items"] = 0
@@ -501,10 +519,19 @@ def apply_manual_resolution_success(job):
             parent["progress"] = ""
             parent["message"] = f"Completed - {parent['total_items']}/{parent['total_items']} tracks saved"
         else:
-            parent["completed_items"] += 1
             parent["message"] = "Completed - missing track resolved manually"
-        parent["log"].append(f"Resolved {spotify_url} from {source_url}")
-        parent["log"] = parent["log"][-40:]
+    elif newly_resolved:
+        parent["status"] = "partial"
+        if parent.get("total_items"):
+            parent["message"] = (
+                f"Partial - {parent['completed_items']}/{parent['total_items']} "
+                f"tracks saved; {len(unresolved)} failed"
+            )
+        else:
+            parent["message"] = (
+                f"Partial - {parent['completed_items']} tracks saved; "
+                f"{len(unresolved)} failed"
+            )
 
 
 def album_playlist_metadata_args(compilation=False):
@@ -1156,6 +1183,10 @@ def run_job(job_id):
                 pass
 
         spotdl_missing_tracks = extract_spotdl_missing_tracks(spotdl_errors)
+        unidentified_spotdl_errors = sum(
+            1 for error in spotdl_errors
+            if not _spotify_track_url_re.search(error)
+        )
 
         should_finalize = False
         with jobs_lock:
@@ -1163,12 +1194,13 @@ def run_job(job_id):
             job["returncode"] = returncode
             job["finished_at"] = time.time()
             job["failed_items"] = (
-                (len(spotdl_missing_tracks) or len(spotdl_errors))
+                (len(spotdl_missing_tracks) + unidentified_spotdl_errors)
                 if is_spotify
                 else len(extract_youtube_missing_tracks(job.get("log", [])))
             )
             if is_spotify:
                 job["missing_tracks"] = spotdl_missing_tracks
+                job["unidentified_failed_items"] = unidentified_spotdl_errors
             else:
                 job["missing_tracks"] = extract_youtube_missing_tracks(job.get("log", []))
             if spotdl_errors:
@@ -1718,7 +1750,11 @@ def retry_job(job_id):
         ]
         download_query = (
             list(dict.fromkeys(unresolved_urls))
-            if source == "spotify" and unresolved_urls
+            if (
+                source == "spotify"
+                and unresolved_urls
+                and not previous.get("unidentified_failed_items")
+            )
             else None
         )
         retry_count = len(download_query or [])
@@ -1764,6 +1800,7 @@ def retry_job(job_id):
             "source": source,
             "retry_base_completed": completed,
             "failed_items": 0,
+            "unidentified_failed_items": 0,
             "missing_tracks": [],
             "resolution_of": None,
             "spotify_track_url": None,
@@ -1961,6 +1998,7 @@ def resolve_missing_spotify_track(job_id):
             "source": "spotify",
             "retry_base_completed": 0,
             "failed_items": 0,
+            "unidentified_failed_items": 0,
             "missing_tracks": [],
             "resolution_of": job_id,
             "spotify_track_url": spotify_url,
