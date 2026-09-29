@@ -212,7 +212,7 @@ def normalize_persisted_job(raw):
 
     now = time.time()
     job_id = str(raw.get("id") or uuid.uuid4().hex[:10])
-    status = raw.get("status") if raw.get("status") in {"queued", "running", "finalizing", "needs_metadata", "succeeded", "failed"} else "failed"
+    status = raw.get("status") if raw.get("status") in {"queued", "running", "finalizing", "needs_metadata", "succeeded", "partial", "failed"} else "failed"
     source = raw.get("source") or ("spotify" if is_spotify_url(raw["url"]) else "yt-dlp")
     retry_base_completed = raw.get("retry_base_completed")
     if retry_base_completed is None:
@@ -436,22 +436,25 @@ def extract_spotdl_missing_tracks(errors):
     missing = []
     seen = set()
     for error in errors:
-        if "No results found for song:" not in error:
-            continue
-        match = _spotify_track_url_re.search(error)
-        if not match:
-            continue
-        spotify_url = match.group(0)
-        if spotify_url in seen:
-            continue
-        label = error.split("No results found for song:", 1)[1].strip() or spotify_url
-        missing.append({
-            "spotify_url": spotify_url,
-            "label": label,
-            "resolved": False,
-            "source_url": None,
-        })
-        seen.add(spotify_url)
+        matches = list(_spotify_track_url_re.finditer(error))
+        for match in matches:
+            spotify_url = match.group(0)
+            if spotify_url in seen:
+                continue
+
+            if "No results found for song:" in error:
+                label = error.split("No results found for song:", 1)[1].strip()
+            else:
+                label = error.strip()
+
+            missing.append({
+                "spotify_url": spotify_url,
+                "label": label or spotify_url,
+                "reason": error.strip(),
+                "resolved": False,
+                "source_url": None,
+            })
+            seen.add(spotify_url)
     return missing
 
 
@@ -821,10 +824,12 @@ def build_fallback_track_command(query, output_dir):
 
 
 def build_spotdl_command(job):
+    query = job.get("download_query") or job["url"]
+    queries = query if isinstance(query, list) else [query]
     cmd = [
         "spotdl",
         "download",
-        job.get("download_query") or job["url"],
+        *queries,
         "--simple-tui",
         "--headless",
         "--log-level",
@@ -992,7 +997,7 @@ def finalize_staged_job(job_id):
             target_job["staging_owner_id"] = source_job["staging_owner_id"]
 
         target_job["status"] = "finalizing"
-        target_job["message"] = "Validating metadata before library import"
+        target_job["message"] = "Publishing successful downloads"
         persist_jobs_locked()
 
         snapshot = dict(target_job)
@@ -1033,31 +1038,61 @@ def finalize_staged_job(job_id):
                 "confirm artist and album"
             )
         elif result["status"] == "published":
-            target_job["status"] = "succeeded"
+            is_partial = (
+                target_job.get("source") == "spotify"
+                and int(target_job.get("failed_items") or 0) > 0
+            )
+            target_job["status"] = "partial" if is_partial else "succeeded"
             target_job["progress"] = ""
-            target_job["failed_items"] = 0
+            if not is_partial:
+                target_job["failed_items"] = 0
             target_job["final_dir"] = result.get("final_dir")
             target_job["files"] = list(result.get("files") or [])
             target_job["staged_files"] = 0
             target_job["finished_at"] = time.time()
 
-            ignored_count = sum(
-                1 for item in target_job.get("missing_tracks", [])
-                if item.get("source") == "youtube" and item.get("ignored")
-            )
-            artist = result.get("artist") or ""
-            album = result.get("album") or ""
-            if target_job.get("total_items"):
-                suffix = f"; {ignored_count} ignored" if ignored_count else ""
-                target_job["message"] = (
-                    f"Published - {target_job['completed_items']}/{target_job['total_items']} "
-                    f"tracks saved{suffix} - {artist} / {album}"
-                )
+            if is_partial:
+                failed_count = max(1, int(target_job.get("failed_items") or 0))
+                if target_job.get("total_items"):
+                    target_job["message"] = (
+                        f"Partial - {target_job['completed_items']}/{target_job['total_items']} "
+                        f"tracks published; {failed_count} failed"
+                    )
+                else:
+                    target_job["message"] = (
+                        f"Partial - {target_job['completed_items']} tracks published; "
+                        f"{failed_count} failed"
+                    )
             else:
-                target_job["message"] = (
-                    f"Published - {len(target_job['files'])} file(s) - {artist} / {album}"
+                ignored_count = sum(
+                    1 for item in target_job.get("missing_tracks", [])
+                    if item.get("source") == "youtube" and item.get("ignored")
                 )
+                artist = result.get("artist") or ""
+                album = result.get("album") or ""
+                if target_job.get("source") == "spotify":
+                    if target_job.get("total_items"):
+                        target_job["message"] = (
+                            f"Published - {target_job['completed_items']}/"
+                            f"{target_job['total_items']} tracks saved"
+                        )
+                    else:
+                        target_job["message"] = (
+                            f"Published - {len(target_job['files'])} file(s)"
+                        )
+                elif target_job.get("total_items"):
+                    suffix = f"; {ignored_count} ignored" if ignored_count else ""
+                    target_job["message"] = (
+                        f"Published - {target_job['completed_items']}/{target_job['total_items']} "
+                        f"tracks saved{suffix} - {artist} / {album}"
+                    )
+                else:
+                    target_job["message"] = (
+                        f"Published - {len(target_job['files'])} file(s) - {artist} / {album}"
+                    )
         else:
+            # A partial run is only useful if its successful files actually
+            # reach the library. Publishing errors remain retryable failures.
             target_job["status"] = "failed"
             target_job["message"] = f"Library import failed: {result.get('message') or 'unknown error'}"
             target_job["finished_at"] = time.time()
@@ -1065,7 +1100,7 @@ def finalize_staged_job(job_id):
         if source_job and source_job["id"] != target_job["id"]:
             if result["status"] == "published":
                 source_job["status"] = "succeeded"
-                source_job["message"] = "Resolved missing track - album published"
+                source_job["message"] = "Resolved missing track - published"
                 source_job["finished_at"] = time.time()
             elif result["status"] == "needs_metadata":
                 source_job["status"] = "succeeded"
@@ -1128,7 +1163,7 @@ def run_job(job_id):
             job["returncode"] = returncode
             job["finished_at"] = time.time()
             job["failed_items"] = (
-                len(spotdl_errors)
+                (len(spotdl_missing_tracks) or len(spotdl_errors))
                 if is_spotify
                 else len(extract_youtube_missing_tracks(job.get("log", [])))
             )
@@ -1147,13 +1182,26 @@ def run_job(job_id):
                 and close_job_if_only_ignored_locked(job)
             )
             failed = (returncode != 0 or bool(spotdl_errors)) and not ignored_youtube_only
-            if not failed:
-                job["status"] = "succeeded"
-                should_finalize = bool(
-                    library_staging.media_files(
-                        library_staging.stage_dir(TEMP_DIR, job)
+            staged_media = library_staging.media_files(
+                library_staging.stage_dir(TEMP_DIR, job)
+            )
+
+            if is_spotify and failed and (staged_media or job.get("retry_base_completed", 0)):
+                job["status"] = "partial"
+                if job["total_items"]:
+                    job["message"] = (
+                        f"Partial - {job['completed_items']}/{job['total_items']} tracks saved; "
+                        f"{max(1, job['failed_items'])} failed"
                     )
-                )
+                else:
+                    job["message"] = (
+                        f"Partial - {job['completed_items']} tracks saved; "
+                        f"{max(1, job['failed_items'])} failed"
+                    )
+                should_finalize = bool(staged_media)
+            elif not failed:
+                job["status"] = "succeeded"
+                should_finalize = bool(staged_media)
                 if is_spotify:
                     if job["total_items"]:
                         job["message"] = f"Completed - {job['completed_items']}/{job['total_items']} tracks saved"
@@ -1174,8 +1222,8 @@ def run_job(job_id):
                 if is_spotify:
                     if job["total_items"]:
                         job["message"] = (
-                            f"Partial - {job['completed_items']}/{job['total_items']} tracks saved; "
-                            f"{max(1, job['failed_items'])} failed"
+                            f"Failed - 0 new tracks published; "
+                            f"{max(1, job['failed_items'])} track(s) failed"
                         )
                     else:
                         job["message"] = f"spotDL failed; {max(1, job['failed_items'])} track(s) failed"
@@ -1260,7 +1308,7 @@ with jobs_lock:
     restored_finalize_ids = [
         job["id"]
         for job in jobs.values()
-        if job.get("status") == "succeeded"
+        if job.get("status") in {"succeeded", "partial"}
         and library_staging.media_files(library_staging.stage_dir(TEMP_DIR, job))
     ]
 
@@ -1553,7 +1601,7 @@ def download():
         jobs[job_id] = job
         if len(jobs) > MAX_HISTORY:
             removable = sorted(
-                (item for item in jobs.values() if item["status"] in {"succeeded", "failed"}),
+                (item for item in jobs.values() if item["status"] in {"succeeded", "partial", "failed"}),
                 key=lambda item: item["created_at"],
             )
             while len(jobs) > MAX_HISTORY and removable:
@@ -1579,7 +1627,7 @@ def download():
 
 @app.delete("/api/jobs/<job_id>")
 def remove_job(job_id):
-    removable_statuses = {"failed", "succeeded", "needs_metadata"}
+    removable_statuses = {"failed", "succeeded", "partial", "needs_metadata"}
 
     with jobs_lock:
         job = jobs.get(job_id)
@@ -1612,7 +1660,7 @@ def remove_job(job_id):
             if library_staging.staging_owner_id(item)
         }
         member_ids = {item["id"] for item in members}
-        destructive = representative.get("status") != "succeeded"
+        destructive = representative.get("status") not in {"succeeded", "partial"}
 
         for member_id in member_ids:
             jobs.pop(member_id, None)
@@ -1648,16 +1696,33 @@ def retry_job(job_id):
         previous = jobs.get(job_id)
         if previous is None:
             return jsonify({"ok": False, "error": "Job not found."}), 404
-        if previous["status"] != "failed":
-            return jsonify({"ok": False, "error": "Only failed jobs can be retried."}), 409
+        if previous["status"] not in {"failed", "partial"}:
+            return jsonify({"ok": False, "error": "Only failed or partial jobs can be retried."}), 409
         if any(job.get("retry_of") == job_id for job in jobs.values()):
             return jsonify({
                 "ok": False,
-                "error": "This attempt has already been retried. Retry the latest failed attempt instead.",
+                "error": "This attempt has already been retried. Retry the latest attempt instead.",
             }), 409
 
         retry_id = uuid.uuid4().hex[:10]
-        completed = min(previous["completed_items"], previous["total_items"]) if previous["total_items"] else previous["completed_items"]
+        completed = (
+            min(previous["completed_items"], previous["total_items"])
+            if previous["total_items"]
+            else previous["completed_items"]
+        )
+        source = previous.get("source", "yt-dlp")
+        unresolved_urls = [
+            item.get("spotify_url")
+            for item in previous.get("missing_tracks", [])
+            if item.get("spotify_url") and not item.get("resolved")
+        ]
+        download_query = (
+            list(dict.fromkeys(unresolved_urls))
+            if source == "spotify" and unresolved_urls
+            else None
+        )
+        retry_count = len(download_query or [])
+
         retry = {
             "id": retry_id,
             "url": previous["url"],
@@ -1669,16 +1734,26 @@ def retry_job(job_id):
             "force": False,
             "status": "queued",
             "message": (
-                f"Continuing after {completed}/{previous['total_items']} tracks"
-                if previous["total_items"]
-                else "Retry queued"
+                f"Retrying {retry_count} failed Spotify track(s)"
+                if retry_count
+                else (
+                    f"Continuing after {completed}/{previous['total_items']} tracks"
+                    if previous["total_items"]
+                    else "Retry queued"
+                )
             ),
             "progress": "",
             "current_item": completed,
             "total_items": previous["total_items"],
             "completed_items": completed,
             "files": list(previous["files"]),
-            "log": [f"Retrying failed job {job_id}; existing files and archive entries will be skipped."],
+            "log": [
+                (
+                    f"Retrying {retry_count} unresolved Spotify track(s) from job {job_id}."
+                    if retry_count
+                    else f"Retrying job {job_id}; existing files and archive entries will be skipped."
+                )
+            ],
             "created_at": time.time(),
             "started_at": None,
             "finished_at": None,
@@ -1686,22 +1761,22 @@ def retry_job(job_id):
             "http_403": False,
             "retry_of": job_id,
             "attempt": previous.get("attempt", 1) + 1,
-            "source": previous.get("source", "yt-dlp"),
+            "source": source,
             "retry_base_completed": completed,
             "failed_items": 0,
             "missing_tracks": [],
             "resolution_of": None,
             "spotify_track_url": None,
             "manual_source_url": None,
-            "download_query": None,
+            "download_query": download_query,
             "staging_owner_id": previous.get("staging_owner_id") or retry_id,
             "source_title": previous.get("source_title"),
             "source_album_artist": previous.get("source_album_artist"),
             "source_thumbnail": previous.get("source_thumbnail"),
             "metadata_artist": previous.get("metadata_artist"),
             "metadata_album": previous.get("metadata_album"),
-            "staged_files": previous.get("staged_files", 0),
-            "final_dir": None,
+            "staged_files": 0,
+            "final_dir": previous.get("final_dir"),
             "finalize_target_id": None,
         }
         jobs[retry_id] = retry
@@ -1715,7 +1790,11 @@ def retry_job(job_id):
             persist_jobs_locked()
         return jsonify({"ok": False, "error": "Download queue is full."}), 429
 
-    return jsonify({"ok": True, "job_id": retry_id}), 202
+    return jsonify({
+        "ok": True,
+        "job_id": retry_id,
+        "retry_tracks": retry_count,
+    }), 202
 
 
 @app.post("/api/jobs/<job_id>/ignore")
@@ -1836,8 +1915,8 @@ def resolve_missing_spotify_track(job_id):
         parent = jobs.get(job_id)
         if parent is None:
             return jsonify({"ok": False, "error": "Job not found."}), 404
-        if parent.get("source") != "spotify" or parent["status"] != "failed":
-            return jsonify({"ok": False, "error": "Only failed Spotify jobs can resolve missing tracks."}), 409
+        if parent.get("source") != "spotify" or parent["status"] not in {"failed", "partial"}:
+            return jsonify({"ok": False, "error": "Only failed or partial Spotify jobs can resolve missing tracks."}), 409
 
         missing = next(
             (item for item in parent.get("missing_tracks", []) if item.get("spotify_url") == spotify_url),
