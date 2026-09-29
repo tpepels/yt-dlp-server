@@ -93,6 +93,63 @@ jobs:
           assert "yt-dlp-server-chrome-extension-v1.0.0.zip" in disposition, disposition
           assert response.mimetype == "application/zip", response.mimetype
           PY
+      - name: Validate Plex post-publish nudge
+        run: |
+          docker run --rm --user 1000:1000 \
+            -e MUSIC_ROOT=/tmp/music \
+            -e STATE_DIR=/tmp/state \
+            -e TEMP_DIR=/tmp/work \
+            -e PLEX_RESCAN_NUDGE_SECONDS=90 \
+            yt-dlp-server:test python - <<'PY'
+          import pathlib
+          import tempfile
+          import time
+
+          import app
+
+          root = pathlib.Path(tempfile.mkdtemp())
+          app.IMPORT_ROOT = root / "YT-DLP Imports"
+          app.IMPORT_ROOT.mkdir(parents=True)
+
+          before = app.IMPORT_ROOT.stat().st_mtime_ns
+          time.sleep(0.01)
+          app._emit_library_change_nudge()
+          after = app.IMPORT_ROOT.stat().st_mtime_ns
+
+          assert after >= before
+          assert not list(app.IMPORT_ROOT.glob(".yt-dlp-refresh-*"))
+
+          # Debouncing replaces an older scheduled nudge instead of spawning
+          # one timer for every album in a batch.
+          class FakeTimer:
+              created = []
+              def __init__(self, seconds, fn):
+                  self.seconds = seconds
+                  self.fn = fn
+                  self.cancelled = False
+                  self.daemon = False
+                  FakeTimer.created.append(self)
+              def start(self):
+                  pass
+              def cancel(self):
+                  self.cancelled = True
+
+          real_timer = app.threading.Timer
+          app.threading.Timer = FakeTimer
+          app.library_nudge_timer = None
+          try:
+              app.schedule_library_change_nudge(delay=90)
+              first = app.library_nudge_timer
+              app.schedule_library_change_nudge(delay=90)
+              second = app.library_nudge_timer
+          finally:
+              app.threading.Timer = real_timer
+              app.library_nudge_timer = None
+
+          assert first is not second
+          assert first.cancelled is True
+          assert second.seconds == 90
+          PY
       - name: Validate non-root runtime, naming and playlist classification
         run: |
           docker run --rm --user 1000:1000 \
