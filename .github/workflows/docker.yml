@@ -881,6 +881,49 @@ jobs:
 
           assert app.jobs["zero1"]["status"] == "failed", app.jobs["zero1"]
           assert not list(app.IMPORT_ROOT.rglob("*FailTrackAAA111*"))
+
+          # Upgrade recovery: jobs created before this fix were persisted as
+          # failed even when they had successful media in staging. The first
+          # restart after upgrading must publish those files automatically.
+          app.jobs.clear()
+          legacy_error = (
+              failed_a + " - AudioProviderError: YT-DLP download error"
+          )
+          legacy = app.normalize_persisted_job({
+              "id": "legacy-partial",
+              "url": "https://open.spotify.com/playlist/legacy",
+              "status": "failed",
+              "source": "spotify",
+              "playlist": True,
+              "staging_owner_id": "legacy-partial",
+              "total_items": 2,
+              "completed_items": 1,
+              "failed_items": 1,
+              "log": ["spotDL errors:", legacy_error],
+              # Simulate the old schema where AudioProviderError was not added
+              # to missing_tracks.
+              "missing_tracks": [],
+          })
+          assert legacy["missing_tracks"][0]["spotify_url"] == failed_a, legacy
+          app.jobs[legacy["id"]] = legacy
+          legacy_stage = staging.ensure_stage_dir(app.TEMP_DIR, legacy)
+          legacy_file = (
+              legacy_stage / "New Order" / "Substance"
+              / "02 - Bizarre Love Triangle [GoodTrackLegacy].opus"
+          )
+          legacy_file.parent.mkdir(parents=True)
+          legacy_file.write_bytes(b"legacy")
+
+          recovery = app.staged_jobs_to_finalize_after_restore()
+          assert recovery == ["legacy-partial"], recovery
+          assert app.jobs["legacy-partial"]["status"] == "partial"
+          app.finalize_staged_job("legacy-partial")
+          assert app.jobs["legacy-partial"]["status"] == "partial"
+          assert not legacy_stage.exists()
+          assert (
+              app.IMPORT_ROOT / "New Order" / "Substance"
+              / "02 - Bizarre Love Triangle [GoodTrackLegacy].opus"
+          ).read_bytes() == b"legacy"
           PY
       - name: Validate Monochrome fallback track endpoint
         run: |
