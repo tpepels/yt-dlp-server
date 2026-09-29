@@ -732,7 +732,156 @@ jobs:
             -e MUSIC_ROOT=/tmp/music \
             -e STATE_DIR=/tmp/state \
             -e TEMP_DIR=/tmp/work \
-            yt-dlp-server:test python -c 'import queue, app; u="https://open.spotify.com/album/4yP0hdKOZPNshxUOjY0cZj"; assert app.is_spotify_url(u); assert app.spotify_link_type(u)=="album"; j={"id":"sp1","staging_owner_id":"sp1","url":u,"force":False,"download_query":None}; cmd=app.build_spotdl_command(j); assert cmd[:3]==["spotdl","download",u]; ai=cmd.index("--audio"); assert cmd[ai+1:ai+5]==["youtube-music","youtube","bandcamp","soundcloud"]; assert "--archive" in cmd and str(app.SPOTDL_ARCHIVE_FILE) in cmd; assert "--format" in cmd and "opus" in cmd; assert "--bitrate" in cmd and "disable" in cmd; assert app.library_staging.staged_spotdl_output_template(app.TEMP_DIR, j).endswith("{track-number} - {title} [{track-id}].{output-ext}"); assert "/tmp/work/staging/sp1/" in app.library_staging.staged_spotdl_output_template(app.TEMP_DIR, j); assert "youtube:player_client=mweb" in app.spotdl_ytdlp_args(); assert "youtubepot-bgutilscript:server_home=" in app.spotdl_ytdlp_args(); force=app.build_spotdl_command({"id":"sp2","staging_owner_id":"sp2","url":u,"force":True}); assert "--archive" not in force; assert force[force.index("--overwrite")+1]=="force"; app.jobs.clear(); app.jobs["sp"]={"id":"sp","source":"spotify","completed_items":0,"total_items":0,"current_item":0,"retry_base_completed":0,"message":"","progress":"","files":[],"log":[],"http_403":False}; app.append_log("sp","INFO: 1/8 complete"); assert app.jobs["sp"]["total_items"]==8 and app.jobs["sp"]["current_item"]==1; app.append_log("sp", "INFO: Downloaded \"Artist - Track\": https://youtube.com/watch?v=x"); assert app.jobs["sp"]["completed_items"]==1; err="https://open.spotify.com/track/4EIGit0b2tPnfp4jPdrtKZ - LookupError: No results found for song: GAS - Pop 3"; missing=app.extract_spotdl_missing_tracks([err]); assert missing==[{"spotify_url":"https://open.spotify.com/track/4EIGit0b2tPnfp4jPdrtKZ","label":"GAS - Pop 3","resolved":False,"source_url":None}]; assert app.is_manual_spotify_source_url("https://kompakt-gas.bandcamp.com/track/pop-3"); assert app.is_manual_spotify_source_url("https://www.youtube.com/watch?v=abc123"); assert not app.is_manual_spotify_source_url("https://example.com/audio"); app.download_queue=queue.Queue(maxsize=5); app.jobs.clear(); app.jobs["parent"]={"id":"parent","source":"spotify","status":"failed","missing_tracks":missing,"total_items":7,"completed_items":6,"current_item":7,"progress":"","failed_items":1,"log":[]}; client=app.app.test_client(); rr=client.post("/api/jobs/parent/resolve", json={"spotify_url":missing[0]["spotify_url"],"source_url":"https://kompakt-gas.bandcamp.com/track/pop-3"}); assert rr.status_code==202, rr.data; child=app.jobs[rr.get_json()["job_id"]]; assert child["download_query"]=="https://kompakt-gas.bandcamp.com/track/pop-3|https://open.spotify.com/track/4EIGit0b2tPnfp4jPdrtKZ"; assert child["resolution_of"]=="parent"; child["completed_items"]=1; app.apply_manual_resolution_success(child); assert app.jobs["parent"]["status"]=="succeeded"; assert app.jobs["parent"]["completed_items"]==7; assert app.jobs["parent"]["missing_tracks"][0]["resolved"] is True; p=client.post("/api/probe", json={"url":u}); assert p.status_code==200 and p.get_json()["kind"]=="spotify" and p.get_json()["is_album"] is True; t=client.post("/api/probe", json={"url":"https://open.spotify.com/track/4EIGit0b2tPnfp4jPdrtKZ"}); assert t.status_code==200 and t.get_json()["kind"]=="spotify" and t.get_json()["is_album"] is False'
+            yt-dlp-server:test python -c 'import queue, app; u="https://open.spotify.com/album/4yP0hdKOZPNshxUOjY0cZj"; assert app.is_spotify_url(u); assert app.spotify_link_type(u)=="album"; j={"id":"sp1","staging_owner_id":"sp1","url":u,"force":False,"download_query":None}; cmd=app.build_spotdl_command(j); assert cmd[:3]==["spotdl","download",u]; ai=cmd.index("--audio"); assert cmd[ai+1:ai+5]==["youtube-music","youtube","bandcamp","soundcloud"]; assert "--archive" in cmd and str(app.SPOTDL_ARCHIVE_FILE) in cmd; assert "--format" in cmd and "opus" in cmd; assert "--bitrate" in cmd and "disable" in cmd; assert app.library_staging.staged_spotdl_output_template(app.TEMP_DIR, j).endswith("{track-number} - {title} [{track-id}].{output-ext}"); assert "/tmp/work/staging/sp1/" in app.library_staging.staged_spotdl_output_template(app.TEMP_DIR, j); assert "youtube:player_client=mweb" in app.spotdl_ytdlp_args(); assert "youtubepot-bgutilscript:server_home=" in app.spotdl_ytdlp_args(); force=app.build_spotdl_command({"id":"sp2","staging_owner_id":"sp2","url":u,"force":True}); assert "--archive" not in force; assert force[force.index("--overwrite")+1]=="force"; app.jobs.clear(); app.jobs["sp"]={"id":"sp","source":"spotify","completed_items":0,"total_items":0,"current_item":0,"retry_base_completed":0,"message":"","progress":"","files":[],"log":[],"http_403":False}; app.append_log("sp","INFO: 1/8 complete"); assert app.jobs["sp"]["total_items"]==8 and app.jobs["sp"]["current_item"]==1; app.append_log("sp", "INFO: Downloaded \"Artist - Track\": https://youtube.com/watch?v=x"); assert app.jobs["sp"]["completed_items"]==1; err="https://open.spotify.com/track/4EIGit0b2tPnfp4jPdrtKZ - LookupError: No results found for song: GAS - Pop 3"; missing=app.extract_spotdl_missing_tracks([err]); assert missing[0]["spotify_url"]=="https://open.spotify.com/track/4EIGit0b2tPnfp4jPdrtKZ"; assert missing[0]["label"]=="GAS - Pop 3"; assert missing[0]["reason"]==err; assert missing[0]["resolved"] is False; assert app.is_manual_spotify_source_url("https://kompakt-gas.bandcamp.com/track/pop-3"); assert app.is_manual_spotify_source_url("https://www.youtube.com/watch?v=abc123"); assert not app.is_manual_spotify_source_url("https://example.com/audio"); app.download_queue=queue.Queue(maxsize=5); app.jobs.clear(); app.jobs["parent"]={"id":"parent","source":"spotify","status":"failed","missing_tracks":missing,"total_items":7,"completed_items":6,"current_item":7,"progress":"","failed_items":1,"log":[]}; client=app.app.test_client(); rr=client.post("/api/jobs/parent/resolve", json={"spotify_url":missing[0]["spotify_url"],"source_url":"https://kompakt-gas.bandcamp.com/track/pop-3"}); assert rr.status_code==202, rr.data; child=app.jobs[rr.get_json()["job_id"]]; assert child["download_query"]=="https://kompakt-gas.bandcamp.com/track/pop-3|https://open.spotify.com/track/4EIGit0b2tPnfp4jPdrtKZ"; assert child["resolution_of"]=="parent"; child["completed_items"]=1; app.apply_manual_resolution_success(child); assert app.jobs["parent"]["status"]=="succeeded"; assert app.jobs["parent"]["completed_items"]==7; assert app.jobs["parent"]["missing_tracks"][0]["resolved"] is True; p=client.post("/api/probe", json={"url":u}); assert p.status_code==200 and p.get_json()["kind"]=="spotify" and p.get_json()["is_album"] is True; t=client.post("/api/probe", json={"url":"https://open.spotify.com/track/4EIGit0b2tPnfp4jPdrtKZ"}); assert t.status_code==200 and t.get_json()["kind"]=="spotify" and t.get_json()["is_album"] is False'
+      - name: Validate partial Spotify playlist publishing
+        run: |
+          docker run --rm --user 1000:1000 \
+            -e MUSIC_ROOT=/tmp/music \
+            -e STATE_DIR=/tmp/state \
+            -e TEMP_DIR=/tmp/work \
+            yt-dlp-server:test python - <<'PY'
+          import pathlib
+          import queue
+          import tempfile
+
+          import app
+          import staging
+
+          root = pathlib.Path(tempfile.mkdtemp())
+          app.TEMP_DIR = root / "tmp"
+          app.IMPORT_ROOT = root / "library"
+          app.STATE_DIR = root / "state"
+          app.STATE_DIR.mkdir(parents=True)
+          app.JOBS_STATE_FILE = app.STATE_DIR / "jobs.json"
+          app.SPOTDL_ARCHIVE_FILE = app.STATE_DIR / "spotdl-archive.txt"
+          app.download_queue = queue.Queue(maxsize=10)
+          app.jobs.clear()
+
+          playlist_url = "https://open.spotify.com/playlist/test-partial"
+          failed_a = "https://open.spotify.com/track/FailTrackAAA111"
+          failed_b = "https://open.spotify.com/track/FailTrackBBB222"
+
+          job = app.normalize_persisted_job({
+              "id": "partial1",
+              "url": playlist_url,
+              "status": "queued",
+              "source": "spotify",
+              "playlist": True,
+              "collection_mode": True,
+              "album_mode": False,
+              "staging_owner_id": "partial1",
+              "total_items": 4,
+              "completed_items": 0,
+          })
+          app.jobs[job["id"]] = job
+
+          stage = staging.ensure_stage_dir(app.TEMP_DIR, job)
+          one = stage / "New Order" / "Substance" / "01 - Blue Monday [GoodTrackAAA111].opus"
+          two = stage / "Soft Cell" / "Non-Stop Erotic Cabaret" / "01 - Tainted Love [GoodTrackBBB222].opus"
+          one.parent.mkdir(parents=True)
+          two.parent.mkdir(parents=True)
+          one.write_bytes(b"one")
+          two.write_bytes(b"two")
+
+          error_a = f"{failed_a} - AudioProviderError: YT-DLP download error"
+          error_b = f"{failed_b} - LookupError: No results found for song: Missing Song"
+
+          real_popen = app.subprocess.Popen
+
+          class FakeProcess:
+              def __init__(self, command, **kwargs):
+                  error_path = pathlib.Path(
+                      command[command.index("--save-errors") + 1]
+                  )
+                  error_path.parent.mkdir(parents=True, exist_ok=True)
+                  error_path.write_text(error_a + "\n" + error_b + "\n")
+                  self.stdout = [
+                      'INFO: Downloaded "New Order - Blue Monday": source\n',
+                      'INFO: Downloaded "Soft Cell - Tainted Love": source\n',
+                  ]
+
+              def wait(self):
+                  return 1
+
+          app.subprocess.Popen = FakeProcess
+          try:
+              app.run_job("partial1")
+          finally:
+              app.subprocess.Popen = real_popen
+
+          result = app.jobs["partial1"]
+          assert result["status"] == "partial", result
+          assert result["completed_items"] == 2, result
+          assert result["failed_items"] == 2, result
+          assert result["unidentified_failed_items"] == 0, result
+          assert [m["spotify_url"] for m in result["missing_tracks"]] == [
+              failed_a, failed_b
+          ], result
+          assert "AudioProviderError" in result["missing_tracks"][0]["reason"]
+          assert "LookupError" in result["missing_tracks"][1]["reason"]
+
+          # Successful files are published immediately, preserving each
+          # Spotify track's native Album Artist / Album folders.
+          final_one = (
+              app.IMPORT_ROOT / "New Order" / "Substance"
+              / "01 - Blue Monday [GoodTrackAAA111].opus"
+          )
+          final_two = (
+              app.IMPORT_ROOT / "Soft Cell" / "Non-Stop Erotic Cabaret"
+              / "01 - Tainted Love [GoodTrackBBB222].opus"
+          )
+          assert final_one.read_bytes() == b"one"
+          assert final_two.read_bytes() == b"two"
+          assert not stage.exists(), "successful partial files must leave staging"
+
+          # Retry a partial job using only the failed Spotify tracks.
+          client = app.app.test_client()
+          response = client.post("/api/jobs/partial1/retry")
+          assert response.status_code == 202, response.data
+          retry = app.jobs[response.get_json()["job_id"]]
+          assert retry["download_query"] == [failed_a, failed_b], retry
+          assert retry["retry_base_completed"] == 2, retry
+          retry_cmd = app.build_spotdl_command(retry)
+          assert retry_cmd[:4] == [
+              "spotdl", "download", failed_a, failed_b
+          ], retry_cmd
+
+          # If no track succeeded at all, the job remains failed rather than
+          # claiming a partial publish.
+          zero = app.normalize_persisted_job({
+              "id": "zero1",
+              "url": "https://open.spotify.com/playlist/zero",
+              "status": "queued",
+              "source": "spotify",
+              "playlist": True,
+              "staging_owner_id": "zero1",
+              "total_items": 1,
+          })
+          app.jobs[zero["id"]] = zero
+
+          class ZeroProcess:
+              def __init__(self, command, **kwargs):
+                  error_path = pathlib.Path(
+                      command[command.index("--save-errors") + 1]
+                  )
+                  error_path.parent.mkdir(parents=True, exist_ok=True)
+                  error_path.write_text(
+                      failed_a + " - AudioProviderError: no audio\n"
+                  )
+                  self.stdout = []
+
+              def wait(self):
+                  return 1
+
+          app.subprocess.Popen = ZeroProcess
+          try:
+              app.run_job("zero1")
+          finally:
+              app.subprocess.Popen = real_popen
+
+          assert app.jobs["zero1"]["status"] == "failed", app.jobs["zero1"]
+          assert not list(app.IMPORT_ROOT.rglob("*FailTrackAAA111*"))
+          PY
       - name: Validate Monochrome fallback track endpoint
         run: |
           docker run --rm --user 1000:1000 \
