@@ -27,6 +27,7 @@ MAX_QUEUE = int(os.getenv("MAX_QUEUE", "50"))
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "50"))
 PROBE_TIMEOUT = int(os.getenv("PROBE_TIMEOUT", "30"))
 FALLBACK_TRACK_TIMEOUT = int(os.getenv("FALLBACK_TRACK_TIMEOUT", "600"))
+PLEX_RESCAN_NUDGE_SECONDS = float(os.getenv("PLEX_RESCAN_NUDGE_SECONDS", "90"))
 BGUTIL_SERVER_HOME = Path(os.getenv("BGUTIL_SERVER_HOME", "/opt/bgutil-ytdlp-pot-provider/server"))
 YOUTUBE_PLAYER_CLIENT = os.getenv("YOUTUBE_PLAYER_CLIENT", "mweb").strip() or "mweb"
 
@@ -53,6 +54,8 @@ jobs_lock = threading.Lock()
 probe_cache = {}
 probe_cache_lock = threading.Lock()
 download_queue = queue.Queue(maxsize=MAX_QUEUE)
+library_nudge_lock = threading.Lock()
+library_nudge_timer = None
 _progress_re = re.compile(r"^\[download\]\s+(.+?)(?:\s+of\s+|\s+at\s+|\s+ETA\s+|$)")
 _playlist_item_re = re.compile(r"^\[download\]\s+Downloading item\s+(\d+)\s+of\s+(\d+)")
 _spotdl_progress_re = re.compile(r"(\d+)/(\d+) complete")
@@ -61,6 +64,54 @@ _spotdl_existing_re = re.compile(r"\bSkipping .+\(file already exists\)")
 _spotify_track_url_re = re.compile(r"https://open\.spotify\.com/track/[A-Za-z0-9]+(?:\?[^\s]*)?")
 _youtube_error_re = re.compile(r"^ERROR: \[youtube\] ([A-Za-z0-9_-]{6,}): (.+)$")
 _ansi_re = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _emit_library_change_nudge():
+    """Generate a fresh filesystem event after publishing settles.
+
+    Plex can miss directories created while a long library scan is already
+    running. Creating and immediately removing a tiny hidden marker produces a
+    new watcher event without leaving junk in the music library.
+    """
+    global library_nudge_timer
+
+    marker = IMPORT_ROOT / f".yt-dlp-refresh-{uuid.uuid4().hex[:8]}"
+    try:
+        marker.touch(exist_ok=False)
+    except OSError:
+        marker = None
+    finally:
+        if marker is not None:
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+
+        with library_nudge_lock:
+            library_nudge_timer = None
+
+
+def schedule_library_change_nudge(delay=None):
+    """Debounce a post-publish watcher nudge.
+
+    The final directory creation already gives Plex an immediate notification.
+    This delayed event is specifically a fallback for the case where that
+    notification arrives while Plex is still inside an older scan.
+    """
+    global library_nudge_timer
+
+    seconds = PLEX_RESCAN_NUDGE_SECONDS if delay is None else float(delay)
+    if seconds < 0:
+        return
+
+    with library_nudge_lock:
+        if library_nudge_timer is not None:
+            library_nudge_timer.cancel()
+
+        timer = threading.Timer(seconds, _emit_library_change_nudge)
+        timer.daemon = True
+        library_nudge_timer = timer
+        timer.start()
 
 
 def tool_version(command):
@@ -1154,6 +1205,10 @@ def finalize_staged_job(job_id):
                 source_job["finished_at"] = time.time()
 
         persist_jobs_locked()
+
+    if result.get("status") == "published":
+        schedule_library_change_nudge()
+
     return result
 
 
@@ -1415,6 +1470,11 @@ threading.Thread(
     name="job-display-metadata",
     daemon=True,
 ).start()
+
+# A short startup nudge also repairs the specific upgrade case where files are
+# already in the library but Plex previously noticed them during another scan
+# and never queued a follow-up.
+schedule_library_change_nudge(delay=min(5, PLEX_RESCAN_NUDGE_SECONDS))
 
 
 def request_root_id_locked(job):
