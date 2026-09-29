@@ -270,6 +270,21 @@ def normalize_persisted_job(raw):
         if youtube_missing:
             job["missing_tracks"] = youtube_missing
         close_job_if_only_ignored_locked(job)
+    elif source == "spotify":
+        logged_missing = extract_spotdl_missing_tracks(job["log"])
+        if logged_missing:
+            existing = {
+                item.get("spotify_url"): item
+                for item in job.get("missing_tracks", [])
+                if item.get("spotify_url")
+            }
+            for item in logged_missing:
+                previous = existing.get(item["spotify_url"])
+                if previous:
+                    item["resolved"] = bool(previous.get("resolved"))
+                    item["source_url"] = previous.get("source_url")
+                existing[item["spotify_url"]] = item
+            job["missing_tracks"] = list(existing.values())
 
     # /api/jobs from older versions intentionally exposed less internal state.
     # Reconstruct a queued manual-resolution query when possible.
@@ -1334,15 +1349,50 @@ def worker():
             download_queue.task_done()
 
 
-restored_queue_ids = load_persisted_jobs()
+def staged_jobs_to_finalize_after_restore():
+    finalize_ids = []
+    changed = False
+    with jobs_lock:
+        for job in jobs.values():
+            staged = library_staging.media_files(
+                library_staging.stage_dir(TEMP_DIR, job)
+            )
+            if not staged:
+                continue
 
-with jobs_lock:
-    restored_finalize_ids = [
-        job["id"]
-        for job in jobs.values()
-        if job.get("status") in {"succeeded", "partial"}
-        and library_staging.media_files(library_staging.stage_dir(TEMP_DIR, job))
-    ]
+            if job.get("status") in {"succeeded", "partial"}:
+                finalize_ids.append(job["id"])
+                continue
+
+            # Before partial publishing existed, mixed Spotify runs were
+            # persisted as failed even though their successful tracks remained
+            # safely staged. Recover those jobs on the first restart after
+            # upgrading instead of forcing the entire playlist to run again.
+            if job.get("source") == "spotify" and job.get("status") == "failed":
+                job["status"] = "partial"
+                job["failed_items"] = max(
+                    1,
+                    int(job.get("failed_items") or 0),
+                    len([
+                        item for item in job.get("missing_tracks", [])
+                        if not item.get("resolved")
+                    ]),
+                )
+                job["message"] = (
+                    f"Recovering partial Spotify download - "
+                    f"{len(staged)} staged track(s) ready to publish"
+                )
+                finalize_ids.append(job["id"])
+                changed = True
+
+        if changed:
+            persist_jobs_locked()
+
+    return finalize_ids
+
+
+restored_queue_ids = load_persisted_jobs()
+restored_finalize_ids = staged_jobs_to_finalize_after_restore()
 
 for restored_id in restored_finalize_ids:
     finalize_staged_job(restored_id)
